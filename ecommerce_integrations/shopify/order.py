@@ -146,7 +146,6 @@ def create_sales_order(shopify_order, setting, company=None):
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
 		so.save(ignore_permissions=True)
 		so.submit()
-		
 		# frappe.log_error(json.dumps(taxes, indent=2), "Taxes Data")
 
 		if shopify_order.get("note"):
@@ -213,6 +212,23 @@ def get_delivery_date_from_taxes(taxes, setting, order_created_date=None):
     )
     return base_date
 
+def get_shopify_item_extra_fields(line_item):
+
+	qty = cint(line_item.get("quantity")) or 1
+	unit_price = flt(line_item.get("price") or 0)
+
+	discount_allocations = line_item.get("discount_allocations") or []
+	item_discount = flt(discount_allocations[0].get("amount")) if discount_allocations else 0
+
+	custom_shopify_base_rate = unit_price
+
+	custom_shopify_rate = unit_price - (item_discount / qty)
+
+	return {
+		"custom_shopify_base_rate": custom_shopify_base_rate,
+		"custom_applied_discount_from_shopify": item_discount,
+		"custom_shopify_rate": custom_shopify_rate,
+	}
 
 def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 	items = []
@@ -231,6 +247,8 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 	if all_product_exists:
 		for shopify_item in order_items:
 			item_code = get_item_code(shopify_item)
+
+			extra_fields = get_shopify_item_extra_fields(shopify_item)
 			items.append(
 				{
 					"item_code": item_code,
@@ -243,6 +261,9 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 					ORDER_ITEM_DISCOUNT_FIELD: (
 						_get_total_discount(shopify_item) / cint(shopify_item.get("quantity"))
 					),
+					"custom_applied_discount_from_shopify": extra_fields["custom_applied_discount_from_shopify"],
+    				"custom_shopify_rate": extra_fields["custom_shopify_rate"],
+					"custom_shopify_base_rate": extra_fields["custom_shopify_base_rate"],
 				}
 			)
 
