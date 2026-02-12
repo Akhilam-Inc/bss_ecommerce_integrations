@@ -3,7 +3,7 @@ from typing import Literal, Optional
 
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr, flt, get_datetime, getdate, nowdate
+from frappe.utils import cint, cstr, flt, get_datetime, getdate, nowdate,add_days,nowtime
 from shopify.collection import PaginatedIterator
 from shopify.resources import Order
 
@@ -102,6 +102,13 @@ def create_sales_order(shopify_order, setting, company=None):
 			return ""
 
 		taxes = get_order_taxes(shopify_order, setting, items)
+		order_created_date = getdate(shopify_order.get("created_at"))
+		delivery_date = get_delivery_date_from_taxes(taxes, setting, order_created_date)
+
+		# Update delivery_date in all items
+		for d in items:
+			d["delivery_date"] = delivery_date
+
 		so = frappe.get_doc(
 			{
 				"doctype": "Sales Order",
@@ -110,7 +117,19 @@ def create_sales_order(shopify_order, setting, company=None):
 				ORDER_NUMBER_FIELD: shopify_order.get("name"),
 				"customer": customer,
 				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
-				"delivery_date": getdate(shopify_order.get("created_at")) or nowdate(),
+				"delivery_date": delivery_date,  # ✅ FIX: Add delivery_date here
+				"custom_payment_status": shopify_order.get("financial_status"),
+				"custom_shopify_order_creation_date": getdate(shopify_order.get("created_at")) or getdate(nowdate()),
+				"custom_order_source": "Shopify",
+				"custom_priority": "Medium",
+				"custom_pincode": shopify_order.get("customer", {}).get("default_address", {}).get("zip") or "",
+				"custom_pincode_area": frappe.db.get_value("Pincode", {"pincode": shopify_order.get("customer", {}).get("default_address", {}).get("zip")}, "area") or "",
+				"custom_shopify_order_creation_time": (
+					get_datetime(shopify_order.get("created_at")).time()
+					if shopify_order.get("created_at")
+					else nowtime()
+				),
+				"custom_order_notes": shopify_order.get("note"),
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
 				"ignore_pricing_rule": 1,
@@ -122,10 +141,13 @@ def create_sales_order(shopify_order, setting, company=None):
 
 		if company:
 			so.update({"company": company, "status": "Draft"})
+		
 		so.flags.ignore_mandatory = True
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
 		so.save(ignore_permissions=True)
 		so.submit()
+		
+		# frappe.log_error(json.dumps(taxes, indent=2), "Taxes Data")
 
 		if shopify_order.get("note"):
 			so.add_comment(text=f"Order Note: {shopify_order.get('note')}")
@@ -136,20 +158,78 @@ def create_sales_order(shopify_order, setting, company=None):
 	return so
 
 
+def get_delivery_date_from_taxes(taxes, setting, order_created_date=None):
+    """
+    Calculate delivery date based on FIRST matching tax in priority order.
+    """
+    if not taxes:
+        return getdate(order_created_date or nowdate())
+    
+    base_date = getdate(order_created_date or nowdate())
+    
+    for tax in taxes:
+        description = (tax.get("description") or "").strip()
+        
+        if not description:
+            continue
+        
+        # Case-insensitive search
+        result = frappe.db.sql("""
+            SELECT days, tax_description
+            FROM `tabShopify Tax Account`
+            WHERE parent = %s 
+            AND LOWER(tax_description) = LOWER(%s)
+            LIMIT 1
+        """, (setting.name, description), as_dict=True)
+        
+        if result:
+            try:
+                days_int = int(float(result[0].days))
+                
+                if days_int > 0:
+                    delivery_date = add_days(base_date, days_int)
+                    
+                    frappe.log_error(
+                        f"Tax: {result[0].tax_description}\n"
+                        f"Days: {days_int}\n"
+                        f"Base Date: {base_date}\n"
+                        f"Delivery Date: {delivery_date}",
+                        "Delivery Date Calculated"
+                    )
+                    
+                    return delivery_date
+                    
+            except (ValueError, TypeError) as e:
+                frappe.log_error(
+                    f"Invalid days value for tax: {description}\nError: {str(e)}",
+                    "Delivery Date Error"
+                )
+                continue
+    
+    # No match found
+    frappe.log_error(
+        f"No valid tax match found. Using base date: {base_date}",
+        "Delivery Date - Default Used"
+    )
+    return base_date
+
+
 def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 	items = []
 	all_product_exists = True
 	product_not_exists = []
 
+	# ✅ FIX: First loop through all items to check existence
 	for shopify_item in order_items:
 		if not shopify_item.get("product_exists"):
 			all_product_exists = False
 			product_not_exists.append(
 				{"title": shopify_item.get("title"), ORDER_ID_FIELD: shopify_item.get("id")}
 			)
-			continue
 
-		if all_product_exists:
+	# ✅ FIX: Then build items only if all products exist
+	if all_product_exists:
+		for shopify_item in order_items:
 			item_code = get_item_code(shopify_item)
 			items.append(
 				{
@@ -165,8 +245,6 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 					),
 				}
 			)
-		else:
-			items = []
 
 	return items
 
@@ -192,6 +270,7 @@ def _get_item_price(line_item, taxes_inclusive: bool) -> float:
 def _get_total_discount(line_item) -> float:
 	discount_allocations = line_item.get("discount_allocations") or []
 	return sum(flt(discount.get("amount")) for discount in discount_allocations)
+
 
 
 def get_order_taxes(shopify_order, setting, items):
