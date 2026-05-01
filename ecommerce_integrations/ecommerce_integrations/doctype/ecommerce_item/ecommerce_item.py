@@ -72,6 +72,10 @@ def is_synced(
 		filter.update({"variant_id": variant_id})
 
 	item_exists = bool(frappe.db.exists("Ecommerce Item", filter))
+	# if item doesn't exist with integration_item_code and variant_id then check with SKU
+	if item_exists:
+		item_code = get_erpnext_item_code(integration, integration_item_code, variant_id=variant_id)
+		frappe.db.set_value("Item", item_code, "custom_shopify_sku", sku, update_modified=False)
 
 	if not item_exists and sku:
 		return _is_sku_synced(integration, sku)
@@ -150,6 +154,7 @@ def create_ecommerce_item(
 		"is_stock_item": 1,
 		"is_sales_item": 1,
 		"item_defaults": [{"company": get_default_company()}],
+		"custom_shopify_sku": sku,
 	}
 
 	item.update(item_dict)

@@ -82,6 +82,7 @@ def get_shopify_product_count():
 def sync_product(product):
 	try:
 		shopify_product = ShopifyProduct(product)
+		update_item_sku(product, integration="shopify")
 		shopify_product.sync_product()
 
 		return True
@@ -112,8 +113,33 @@ def _resync_product(product):
 		return False
 
 
+# def is_synced(product):
+# 	return ecommerce_item.is_synced(MODULE_NAME, integration_item_code=product, sku=sku)
+
+@temp_shopify_session
 def is_synced(product):
-	return ecommerce_item.is_synced(MODULE_NAME, integration_item_code=product)
+	item = Product.find(product)
+
+	# If no variants → fallback
+	if not item.variants:
+		return ecommerce_item.is_synced(
+			MODULE_NAME,
+			integration_item_code=product
+		)
+
+	# Check if ANY variant is not synced
+	for variant in item.variants:
+		synced = ecommerce_item.is_synced(
+			MODULE_NAME,
+			integration_item_code=product,
+			variant_id=variant.id,
+			sku=variant.sku
+		)
+
+		if not synced:
+			return False
+
+	return True
 
 
 @frappe.whitelist()
@@ -146,6 +172,11 @@ def queue_sync_all_products(*args, **kwargs):
 
 				shopify_product = ShopifyProduct(product.id)
 				shopify_product.sync_product()
+
+				sku = product.variants[0].sku if product.variants else ""
+				item_code = frappe.db.get_value("Ecommerce Item", {"integration_item_code": product.id}, "erpnext_item_code")
+				if item_code and sku:
+					frappe.db.set_value("Item", item_code, "custom_shopify_sku", sku)
 
 				publish(f"✅ Synced Product {product.id}", synced=True)
 
@@ -180,3 +211,27 @@ def publish(message, synced=False, error=False, done=False, br=True):
 			"done": done,
 		},
 	)
+
+def update_item_sku(product, integration="shopify"):
+	for variant in product.variants:
+		if not variant.sku:
+			continue
+
+		item_code = ecommerce_item.get_erpnext_item_code(
+			integration,
+			product.id,
+			variant.id
+		)
+
+		if not item_code:
+			frappe.log_error("Shopify Sync",f"Item code not found for product {product.id} and variant {variant.id}")
+			continue
+
+		# Only update custom field (SAFE)
+		frappe.db.set_value(
+			"Item",
+			item_code,
+			"custom_shopify_sku",
+			variant.sku,
+			update_modified=False
+		)
