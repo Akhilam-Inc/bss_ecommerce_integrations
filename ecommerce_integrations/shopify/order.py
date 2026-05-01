@@ -38,6 +38,29 @@ def sync_sales_order(payload, request_id=None):
 		create_shopify_log(status="Invalid", message="Sales order already exists, not synced")
 		return
 	try:
+		# ==============================================================================
+		# NEW: VALIDATE SHIPPING TYPE MASTER (EXISTS & ACTIVE)
+		# ==============================================================================
+		shipping_lines = order.get("shipping_lines") or []
+		if shipping_lines:
+			# Shopify uses 'code', fallback to 'title' just in case
+			shipping_code = shipping_lines[0].get("code") or shipping_lines[0].get("title")
+			
+			if shipping_code:
+				# Fetch the active status. Returns None if missing, 0 if inactive, 1 if active.
+				is_active = frappe.db.get_value("Shipping Type", shipping_code, "active")
+				
+				if is_active is None:
+					frappe.throw(
+						f"Sync halted: Missing Shipping Type '{shipping_code}'. "
+						f"Please add this exactly as written to the Shipping Type master, then click Retry on this log."
+					)
+				elif not cint(is_active):
+					frappe.throw(
+						f"Sync halted: Shipping Type '{shipping_code}' is currently marked as Inactive. "
+						f"Please check the 'Active' box in the Shipping Type master, then click Retry on this log."
+					)
+		# ==============================================================================
 		shopify_customer = order.get("customer") if order.get("customer") is not None else {}
 		shopify_customer["billing_address"] = order.get("billing_address", "")
 		shopify_customer["shipping_address"] = order.get("shipping_address", "")
@@ -129,6 +152,7 @@ def create_sales_order(shopify_order, setting, company=None):
 					if shopify_order.get("created_at")
 					else nowtime()
 				),
+				"custom_shopify_order_shipping_type": shopify_order.get("shipping_lines", [{}])[0].get("code") or "",
 				"custom_order_notes": shopify_order.get("note"),
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
