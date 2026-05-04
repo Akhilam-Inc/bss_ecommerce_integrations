@@ -72,11 +72,6 @@ def is_synced(
 		filter.update({"variant_id": variant_id})
 
 	item_exists = bool(frappe.db.exists("Ecommerce Item", filter))
-	# if item doesn't exist with integration_item_code and variant_id then check with SKU
-	if item_exists:
-		item_code = get_erpnext_item_code(integration, integration_item_code, variant_id=variant_id)
-		frappe.db.set_value("Item", item_code, "custom_shopify_sku", sku, update_modified=False)
-
 	if not item_exists and sku:
 		return _is_sku_synced(integration, sku)
 	return item_exists
@@ -136,6 +131,7 @@ def create_ecommerce_item(
 	sku: Optional[str] = None,
 	variant_of: Optional[str] = None,
 	has_variants=0,
+	shopify_updated_at=None,
 ) -> None:
 	"""Create Item in erpnext and link it with Ecommerce item doctype.
 
@@ -174,7 +170,17 @@ def create_ecommerce_item(
 			"variant_of": cstr(variant_of),
 			"sku": sku,
 			"item_synced_on": now(),
+			"shopify_updated_at": shopify_updated_at,
 		}
 	)
 
 	ecommerce_item.insert()
+
+
+def get_shopify_updated_at(integration: str, integration_item_code: str):
+	"""Return the stored shopify_updated_at timestamp for the given product."""
+	return frappe.db.get_value(
+		"Ecommerce Item",
+		{"integration": integration, "integration_item_code": integration_item_code},
+		"shopify_updated_at",
+	)

@@ -2,7 +2,7 @@ from typing import Optional
 
 import frappe
 from frappe import _, msgprint
-from frappe.utils import cint, cstr
+from frappe.utils import cint, cstr, get_datetime, now, today
 from frappe.utils.nestedset import get_root_of
 from shopify.resources import Product, Variant
 
@@ -51,26 +51,208 @@ class ShopifyProduct:
 		)
 
 	@temp_shopify_session
-	def sync_product(self):
+	def sync_product(self, force_update: bool = False):
+		shopify_product = Product.find(self.product_id)
+		product_dict = shopify_product.to_dict()
+
 		if not self.is_synced():
-			shopify_product = Product.find(self.product_id)
-			product_dict = shopify_product.to_dict()
-			self._make_item(product_dict)
+			try:
+				self._make_item(product_dict)
+				return
+			except frappe.UniqueValidationError:
+				frappe.clear_messages()
+
+		# Item exists — update only when Shopify has newer data (or force_update requested)
+		shopify_ts = _parse_shopify_datetime(product_dict.get("updated_at"))
+		stored_ts = ecommerce_item.get_shopify_updated_at(MODULE_NAME, self.product_id)
+		stored_dt = get_datetime(stored_ts) if stored_ts else None
+
+		if force_update or not stored_dt or (shopify_ts and shopify_ts > stored_dt):
+			self._update_item(product_dict)
+
+	def _get_item_code(self, product_dict, variant=None):
+		"""Compute ERPNext item_code based on the item_sync_by setting."""
+		sync_by = getattr(self.setting, "item_sync_by", None) or "Shopify Product ID"
+
+		if variant:
+			# Variant items
+			if sync_by == "SKU":
+				return cstr(variant.get("sku")) or cstr(variant.get("id"))
+			elif sync_by == "Shopify Product Handle":
+				handle = product_dict.get("handle", "")
+				variant_title = variant.get("title", "")
+				return f"{handle}-{variant_title}" if variant_title and variant_title != "Default Title" else handle
+			elif sync_by == "Shopify Product Title":
+				title = product_dict.get("title", "").strip()
+				variant_title = variant.get("title", "")
+				return f"{title}-{variant_title}" if variant_title and variant_title != "Default Title" else title
+			else:  # Shopify Product ID (default)
+				return cstr(variant.get("id"))
+		else:
+			# Template or single (non-variant) items
+			if sync_by == "SKU":
+				# Templates have no SKU; fall back to product ID
+				return cstr(_get_sku(product_dict)) or cstr(product_dict.get("id"))
+			elif sync_by == "Shopify Product Handle":
+				return cstr(product_dict.get("handle")) or cstr(product_dict.get("id"))
+			elif sync_by == "Shopify Product Title":
+				return cstr(product_dict.get("title", "")).strip() or cstr(product_dict.get("id"))
+			else:  # Shopify Product ID (default)
+				return cstr(product_dict.get("id"))
 
 	def _make_item(self, product_dict):
 		_add_weight_details(product_dict)
 
 		warehouse = self.setting.warehouse
+		shopify_updated_at = _parse_shopify_datetime(product_dict.get("updated_at"))
 
 		if _has_variants(product_dict):
 			self.has_variants = 1
 			attributes = self._create_attribute(product_dict)
-			self._create_item(product_dict, warehouse, 1, attributes)
-			self._create_item_variants(product_dict, warehouse, attributes)
+			product_dict["item_code"] = self._get_item_code(product_dict)
+			self._create_item(product_dict, warehouse, 1, attributes, shopify_updated_at=shopify_updated_at)
+			self._create_item_variants(product_dict, warehouse, attributes, shopify_updated_at=shopify_updated_at)
 
 		else:
 			product_dict["variant_id"] = product_dict["variants"][0]["id"]
-			self._create_item(product_dict, warehouse)
+			product_dict["item_code"] = self._get_item_code(product_dict, variant=product_dict["variants"][0])
+			self._create_item(product_dict, warehouse, shopify_updated_at=shopify_updated_at)
+
+	def _update_item(self, product_dict):
+		"""Update existing ERPNext item fields from Shopify product data."""
+		integration_item_code = str(product_dict["id"])
+		_add_weight_details(product_dict)
+
+		template_item = ecommerce_item.get_erpnext_item(
+			MODULE_NAME, integration_item_code=integration_item_code, has_variants=1
+		)
+		if not template_item:
+			template_item = ecommerce_item.get_erpnext_item(
+				MODULE_NAME, integration_item_code=integration_item_code
+			)
+
+		shopify_status = product_dict.get("status", "").lower()
+
+		if template_item:
+			template_item.flags.from_integration = True
+
+			new_name = product_dict.get("title", "").strip()
+			if new_name:
+				template_item.item_name = new_name
+
+			template_item.description = (
+				product_dict.get("body_html") or product_dict.get("title") or template_item.description
+			)
+			template_item.item_group = self._get_item_group(product_dict.get("product_type"))
+
+			image = _get_item_image(product_dict)
+			if image:
+				template_item.image = image
+
+			if product_dict.get("weight") is not None:
+				template_item.weight_per_unit = product_dict["weight"]
+			if product_dict.get("weight_unit"):
+				template_item.weight_uom = WEIGHT_TO_ERPNEXT_UOM_MAP.get(
+					product_dict["weight_unit"], template_item.weight_uom
+				)
+
+			if not _has_variants(product_dict) and product_dict.get("variants"):
+				price = product_dict["variants"][0].get("price")
+				if price is not None:
+					template_item.set(ITEM_SELLING_RATE_FIELD, price)
+
+			if shopify_status == "active":
+				template_item.disabled = 0
+			elif shopify_status in ("draft", "unlisted", "archived"):
+				template_item.disabled = 1
+
+			template_item.save(ignore_permissions=True)
+
+		if _has_variants(product_dict):
+			warehouse = self.setting.warehouse
+			attributes = []
+			for opt in product_dict.get("options", []):
+				if frappe.db.get_value("Item Attribute", opt.get("name")):
+					attributes.append({"attribute": opt.get("name")})
+
+			for variant in product_dict.get("variants", []):
+				variant_id = str(variant["id"])
+				variant_ecom = frappe.db.get_value(
+					"Ecommerce Item",
+					{
+						"integration": MODULE_NAME,
+						"integration_item_code": integration_item_code,
+						"variant_id": variant_id,
+					},
+					["name", "erpnext_item_code"],
+					as_dict=True,
+				)
+
+				if variant_ecom:
+					variant_item = frappe.get_doc("Item", variant_ecom.erpnext_item_code)
+					variant_item.flags.from_integration = True
+
+					title = product_dict.get("title", "").strip()
+					variant_title = variant.get("title", "")
+					if title:
+						variant_item.item_name = f"{title}-{variant_title}"
+
+					if variant.get("weight") is not None:
+						variant_item.weight_per_unit = variant["weight"]
+					if variant.get("weight_unit"):
+						variant_item.weight_uom = WEIGHT_TO_ERPNEXT_UOM_MAP.get(
+							variant["weight_unit"], variant_item.weight_uom
+						)
+
+					if variant.get("price") is not None:
+						variant_item.set(ITEM_SELLING_RATE_FIELD, variant["price"])
+
+					if shopify_status == "active":
+						variant_item.disabled = 0
+					elif shopify_status in ("draft", "unlisted", "archived"):
+						variant_item.disabled = 1
+
+					variant_item.save(ignore_permissions=True)
+				else:
+					# New variant added in Shopify since last sync — create it
+					if template_item and attributes:
+						shopify_updated_at = _parse_shopify_datetime(product_dict.get("updated_at"))
+						shopify_variant_dict = {
+							"id": product_dict["id"],
+							"variant_id": variant["id"],
+							"item_code": self._get_item_code(product_dict, variant=variant),
+							"title": f"{product_dict.get('title', '').strip()}-{variant.get('title', '')}",
+							"product_type": product_dict.get("product_type"),
+							"sku": variant.get("sku"),
+							"uom": template_item.stock_uom or _("Nos"),
+							"item_price": variant.get("price"),
+							"weight_unit": variant.get("weight_unit"),
+							"weight": variant.get("weight"),
+						}
+						variant_attributes = list(attributes)
+						for i, attr_key in enumerate(SHOPIFY_VARIANTS_ATTR_LIST):
+							if variant.get(attr_key) and i < len(variant_attributes):
+								variant_attributes[i] = dict(variant_attributes[i])
+								variant_attributes[i]["attribute_value"] = self._get_attribute_value(
+									variant.get(attr_key), variant_attributes[i]
+								)
+						self._create_item(
+							shopify_variant_dict,
+							warehouse,
+							0,
+							variant_attributes,
+							template_item.name,
+							shopify_updated_at=shopify_updated_at,
+						)
+
+		shopify_updated_at = _parse_shopify_datetime(product_dict.get("updated_at"))
+		if shopify_updated_at:
+			frappe.db.sql(
+				"""UPDATE `tabEcommerce Item`
+				   SET shopify_updated_at = %s, item_synced_on = %s
+				   WHERE integration = %s AND integration_item_code = %s""",
+				(shopify_updated_at, now(), MODULE_NAME, integration_item_code),
+			)
 
 	def _create_attribute(self, product_dict):
 		attribute = []
@@ -116,7 +298,10 @@ class ShopifyProduct:
 			):
 				item_attr.append("item_attribute_values", {"attribute_value": attr_value, "abbr": attr_value})
 
-	def _create_item(self, product_dict, warehouse, has_variant=0, attributes=None, variant_of=None):
+	def _create_item(
+		self, product_dict, warehouse, has_variant=0, attributes=None, variant_of=None,
+		shopify_updated_at=None,
+	):
 		item_dict = {
 			"variant_of": variant_of,
 			"is_stock_item": 1,
@@ -140,7 +325,8 @@ class ShopifyProduct:
 		sku = item_dict["sku"]
 
 		if not _match_sku_and_link_item(
-			item_dict, integration_item_code, variant_id, variant_of=variant_of, has_variant=has_variant
+			item_dict, integration_item_code, variant_id, variant_of=variant_of, has_variant=has_variant,
+			shopify_updated_at=shopify_updated_at,
 		):
 			ecommerce_item.create_ecommerce_item(
 				MODULE_NAME,
@@ -150,9 +336,10 @@ class ShopifyProduct:
 				sku=sku,
 				variant_of=variant_of,
 				has_variants=has_variant,
+				shopify_updated_at=shopify_updated_at,
 			)
 
-	def _create_item_variants(self, product_dict, warehouse, attributes):
+	def _create_item_variants(self, product_dict, warehouse, attributes, shopify_updated_at=None):
 		template_item = ecommerce_item.get_erpnext_item(
 			MODULE_NAME, integration_item_code=product_dict.get("id"), has_variants=1
 		)
@@ -162,7 +349,7 @@ class ShopifyProduct:
 				shopify_item_variant = {
 					"id": product_dict.get("id"),
 					"variant_id": variant.get("id"),
-					"item_code": variant.get("id"),
+					"item_code": self._get_item_code(product_dict, variant=variant),
 					"title": product_dict.get("title", "").strip() + "-" + variant.get("title"),
 					"product_type": product_dict.get("product_type"),
 					"sku": variant.get("sku"),
@@ -177,7 +364,8 @@ class ShopifyProduct:
 						attributes[i].update(
 							{"attribute_value": self._get_attribute_value(variant.get(variant_attr), attributes[i])}
 						)
-				self._create_item(shopify_item_variant, warehouse, 0, attributes, template_item.name)
+				self._create_item(shopify_item_variant, warehouse, 0, attributes, template_item.name,
+								  shopify_updated_at=shopify_updated_at)
 
 	def _get_attribute_value(self, variant_attr_val, attribute):
 		attribute_value = frappe.db.sql(
@@ -263,8 +451,22 @@ def _get_item_image(product_dict):
 	return None
 
 
+def _parse_shopify_datetime(dt_str):
+	"""Parse Shopify ISO-8601 datetime string to a naive datetime for DB comparison."""
+	if not dt_str:
+		return None
+	try:
+		dt = get_datetime(dt_str)
+		if dt and dt.tzinfo is not None:
+			dt = dt.replace(tzinfo=None)
+		return dt
+	except Exception:
+		return None
+
+
 def _match_sku_and_link_item(
-	item_dict, product_id, variant_id, variant_of=None, has_variant=False
+	item_dict, product_id, variant_id, variant_of=None, has_variant=False,
+	shopify_updated_at=None,
 ) -> bool:
 	"""Tries to match new item with existing item using Shopify SKU == item_code.
 
@@ -277,7 +479,7 @@ def _match_sku_and_link_item(
 	item_name = frappe.db.get_value("Item", {"item_code": sku})
 	if item_name:
 		try:
-			ecommerce_item = frappe.get_doc(
+			ecom_item = frappe.get_doc(
 				{
 					"doctype": "Ecommerce Item",
 					"integration": MODULE_NAME,
@@ -286,10 +488,11 @@ def _match_sku_and_link_item(
 					"has_variants": 0,
 					"variant_id": cstr(variant_id),
 					"sku": sku,
+					"shopify_updated_at": shopify_updated_at,
 				}
 			)
 
-			ecommerce_item.insert()
+			ecom_item.insert()
 			return True
 		except Exception:
 			return False
@@ -555,4 +758,34 @@ def write_upload_log(status: bool, product: Product, item, action="Created") -> 
 			request_data=product.to_dict(),
 			message=f"{action} Item: {item.name}, shopify product: {product.id}",
 			method="upload_erpnext_item",
+		)
+
+
+@frappe.whitelist()
+def update_product_erpnext(payload, request_id=None):
+	"""Handle products/update webhook — full field sync with timestamp guard."""
+	if not payload:
+		return
+
+	product_id = str(payload.get("id", ""))
+	if not product_id:
+		return
+
+	if not ecommerce_item.is_synced(MODULE_NAME, product_id):
+		return
+
+	shopify_ts = _parse_shopify_datetime(payload.get("updated_at"))
+	stored_ts = ecommerce_item.get_shopify_updated_at(MODULE_NAME, product_id)
+	stored_dt = get_datetime(stored_ts) if stored_ts else None
+
+	if stored_dt and shopify_ts and shopify_ts <= stored_dt:
+		return  # Nothing changed
+
+	try:
+		product = ShopifyProduct(product_id)
+		product._update_item(payload)
+	except Exception:
+		frappe.log_error(
+			title="Shopify Product Update Error",
+			message=frappe.get_traceback(),
 		)

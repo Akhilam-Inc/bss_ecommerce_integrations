@@ -2,12 +2,13 @@ from time import process_time
 
 import frappe
 from frappe.exceptions import UniqueValidationError
+from frappe.utils import get_datetime
 from shopify.resources import Product
 
 from ecommerce_integrations.ecommerce_integrations.doctype.ecommerce_item import ecommerce_item
 from ecommerce_integrations.shopify.connection import temp_shopify_session
 from ecommerce_integrations.shopify.constants import MODULE_NAME
-from ecommerce_integrations.shopify.product import ShopifyProduct
+from ecommerce_integrations.shopify.product import ShopifyProduct, _parse_shopify_datetime
 
 # constants
 SYNC_JOB_NAME = "shopify.job.sync.all.products"
@@ -28,7 +29,7 @@ def fetch_all_products(from_=None):
 	products = []
 	for product in collection:
 		d = product.to_dict()
-		d["synced"] = is_synced(product.id)
+		d["synced"] = ecommerce_item.is_synced(MODULE_NAME, integration_item_code=str(product.id))
 		products.append(d)
 
 	next_url = None
@@ -61,7 +62,10 @@ def get_product_count():
 	items = frappe.db.get_list("Item", {"variant_of": ["is", "not set"]})
 	erpnext_count = len(items)
 
-	sync_items = frappe.db.get_list("Ecommerce Item", {"variant_of": ["is", "not set"]})
+	sync_items = frappe.db.get_list(
+		"Ecommerce Item",
+		{"variant_of": ["is", "not set"], "integration": MODULE_NAME},
+	)
 	synced_count = len(sync_items)
 
 	shopify_count = get_shopify_product_count()
@@ -82,9 +86,7 @@ def get_shopify_product_count():
 def sync_product(product):
 	try:
 		shopify_product = ShopifyProduct(product)
-		update_item_sku(product, integration="shopify")
 		shopify_product.sync_product()
-
 		return True
 	except Exception:
 		frappe.db.rollback()
@@ -100,46 +102,13 @@ def resync_product(product):
 def _resync_product(product):
 	savepoint = "shopify_resync_product"
 	try:
-		item = Product.find(product)
-
 		frappe.db.savepoint(savepoint)
-		for variant in item.variants:
-			shopify_product = ShopifyProduct(product, variant_id=variant.id)
-			shopify_product.sync_product()
-
+		shopify_product = ShopifyProduct(product)
+		shopify_product.sync_product(force_update=True)
 		return True
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		return False
-
-
-# def is_synced(product):
-# 	return ecommerce_item.is_synced(MODULE_NAME, integration_item_code=product, sku=sku)
-
-@temp_shopify_session
-def is_synced(product):
-	item = Product.find(product)
-
-	# If no variants → fallback
-	if not item.variants:
-		return ecommerce_item.is_synced(
-			MODULE_NAME,
-			integration_item_code=product
-		)
-
-	# Check if ANY variant is not synced
-	for variant in item.variants:
-		synced = ecommerce_item.is_synced(
-			MODULE_NAME,
-			integration_item_code=product,
-			variant_id=variant.id,
-			sku=variant.sku
-		)
-
-		if not synced:
-			return False
-
-	return True
 
 
 @frappe.whitelist()
@@ -166,17 +135,18 @@ def queue_sync_all_products(*args, **kwargs):
 			try:
 				publish(f"Syncing product {product.id}", br=False)
 				frappe.db.savepoint(savepoint)
-				if is_synced(product.id):
-					publish(f"Product {product.id} already synced. Skipping...")
+
+				# Use collection-level updated_at to skip products that are genuinely up to date
+				shopify_ts = _parse_shopify_datetime(getattr(product, "updated_at", None))
+				stored_ts = ecommerce_item.get_shopify_updated_at(MODULE_NAME, str(product.id))
+				stored_dt = get_datetime(stored_ts) if stored_ts else None
+
+				if stored_dt and shopify_ts and shopify_ts <= stored_dt:
+					publish(f"Product {product.id} already up to date. Skipping...")
 					continue
 
 				shopify_product = ShopifyProduct(product.id)
 				shopify_product.sync_product()
-
-				sku = product.variants[0].sku if product.variants else ""
-				item_code = frappe.db.get_value("Ecommerce Item", {"integration_item_code": product.id}, "erpnext_item_code")
-				if item_code and sku:
-					frappe.db.set_value("Item", item_code, "custom_shopify_sku", sku)
 
 				publish(f"✅ Synced Product {product.id}", synced=True)
 
@@ -211,27 +181,3 @@ def publish(message, synced=False, error=False, done=False, br=True):
 			"done": done,
 		},
 	)
-
-def update_item_sku(product, integration="shopify"):
-	for variant in product.variants:
-		if not variant.sku:
-			continue
-
-		item_code = ecommerce_item.get_erpnext_item_code(
-			integration,
-			product.id,
-			variant.id
-		)
-
-		if not item_code:
-			frappe.log_error("Shopify Sync",f"Item code not found for product {product.id} and variant {variant.id}")
-			continue
-
-		# Only update custom field (SAFE)
-		frappe.db.set_value(
-			"Item",
-			item_code,
-			"custom_shopify_sku",
-			variant.sku,
-			update_modified=False
-		)
