@@ -16,20 +16,42 @@ REALTIME_KEY = "shopify.key.sync.all.products"
 
 
 @frappe.whitelist()
-def get_shopify_products(from_=None):
-	shopify_products = fetch_all_products(from_)
-	return shopify_products
+def get_shopify_products(from_=None, title=None, status=None, synced_filter=None):
+	return fetch_all_products(from_=from_, title=title, status=status, synced_filter=synced_filter)
 
 
-def fetch_all_products(from_=None):
-	# format shopify collection for datatable
+def fetch_all_products(from_=None, title=None, status=None, synced_filter=None):
+	shopify_kwargs = {}
+	if title:
+		shopify_kwargs["title"] = title
+	if status:
+		shopify_kwargs["status"] = status
 
-	collection = _fetch_products_from_shopify(from_)
+	# For "synced" filter: restrict Shopify call to known synced product IDs (first page only;
+	# subsequent pages use the cursor URL which already encodes the ids filter).
+	if synced_filter == "synced" and not from_:
+		synced_ids = frappe.db.get_list(
+			"Ecommerce Item",
+			filters={"integration": MODULE_NAME},
+			fields=["integration_item_code"],
+			distinct=True,
+		)
+		id_list = [d.integration_item_code for d in synced_ids if d.integration_item_code]
+		if not id_list:
+			return {"products": [], "nextUrl": None, "prevUrl": None}
+		shopify_kwargs["ids"] = ",".join(id_list[:250])  # Shopify API max
+
+	collection = _fetch_products_from_shopify(from_=from_, **shopify_kwargs)
 
 	products = []
 	for product in collection:
 		d = product.to_dict()
 		d["synced"] = ecommerce_item.is_synced(MODULE_NAME, integration_item_code=str(product.id))
+
+		# "not_synced" is a local-only filter — Shopify has no equivalent
+		if synced_filter == "not_synced" and d["synced"]:
+			continue
+
 		products.append(d)
 
 	next_url = None
@@ -48,12 +70,12 @@ def fetch_all_products(from_=None):
 
 
 @temp_shopify_session
-def _fetch_products_from_shopify(from_=None, limit=20):
+def _fetch_products_from_shopify(from_=None, limit=20, **kwargs):
 	if from_:
+		# Cursor URL already encodes all Shopify-side filters (title, status, ids)
 		collection = Product.find(from_=from_)
 	else:
-		collection = Product.find(limit=limit)
-
+		collection = Product.find(limit=limit, **kwargs)
 	return collection
 
 
