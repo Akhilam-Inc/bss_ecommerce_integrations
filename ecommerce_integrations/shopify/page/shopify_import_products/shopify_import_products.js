@@ -54,12 +54,6 @@ shopify.ProductImporter = class {
 						<div class="shopify-filter-bar mb-3 d-flex flex-wrap align-items-center" style="gap: 8px;">
 							<input type="text" class="form-control form-control-sm" id="filter-title"
 								placeholder="Search by title..." style="max-width: 220px;">
-							<select class="form-control form-control-sm" id="filter-status" style="max-width: 140px;">
-								<option value="">All Statuses</option>
-								<option value="active">Active</option>
-								<option value="draft">Draft</option>
-								<option value="archived">Archived</option>
-							</select>
 							<select class="form-control form-control-sm" id="filter-synced" style="max-width: 150px;">
 								<option value="">All Products</option>
 								<option value="synced">Synced</option>
@@ -160,7 +154,7 @@ shopify.ProductImporter = class {
 	getFilters() {
 		return {
 			title:         this.wrapper.find('#filter-title').val().trim() || null,
-			status:        this.wrapper.find('#filter-status').val() || null,
+			status:        'active',
 			synced_filter: this.wrapper.find('#filter-synced').val() || null,
 		};
 	}
@@ -178,7 +172,6 @@ shopify.ProductImporter = class {
 
 	async clearFilters() {
 		this.wrapper.find('#filter-title').val('');
-		this.wrapper.find('#filter-status').val('');
 		this.wrapper.find('#filter-synced').val('');
 		await this.applyFilters();
 	}

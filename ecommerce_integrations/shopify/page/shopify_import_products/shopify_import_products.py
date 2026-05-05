@@ -150,7 +150,7 @@ def queue_sync_all_products(*args, **kwargs):
 		publish("⚠ Shopify has less products than ERPNext.")
 
 	_sync = True
-	collection = _fetch_products_from_shopify(limit=100)
+	collection = _fetch_products_from_shopify(limit=100, status="active")
 	savepoint = "shopify_product_sync"
 	while _sync:
 		for product in collection:
