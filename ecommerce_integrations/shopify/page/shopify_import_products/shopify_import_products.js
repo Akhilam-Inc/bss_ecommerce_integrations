@@ -52,8 +52,17 @@ shopify.ProductImporter = class {
 						<h5 class="border-bottom pb-2">Products in Shopify</h5>
 
 						<div class="shopify-filter-bar mb-3 d-flex flex-wrap align-items-center" style="gap: 8px;">
-							<input type="text" class="form-control form-control-sm" id="filter-title"
-								placeholder="Search by title..." style="max-width: 220px;">
+							<div>
+								<input type="text" class="form-control form-control-sm" id="filter-title"
+									placeholder="Search by title..." style="max-width: 220px;">
+								<small class="text-muted">Full name match only</small>
+							</div>
+							<select class="form-control form-control-sm" id="filter-status" style="max-width: 140px;">
+								<option value="">All Statuses</option>
+								<option value="active">Active</option>
+								<option value="draft">Draft</option>
+								<option value="archived">Archived</option>
+							</select>
 							<select class="form-control form-control-sm" id="filter-synced" style="max-width: 150px;">
 								<option value="">All Products</option>
 								<option value="synced">Synced</option>
@@ -63,9 +72,7 @@ shopify.ProductImporter = class {
 							<button type="button" class="btn btn-sm btn-default" id="btn-clear-filters">Clear</button>
 						</div>
 
-						<div id="not-synced-notice" class="alert alert-warning small py-2 px-3 mb-2" style="display: none;">
-							Showing unsynced products from this page only — use title search to find specific items.
-						</div>
+						<div id="search-notice" class="alert alert-warning small py-2 px-3 mb-2" style="display: none;"></div>
 
 						<div id="shopify-product-list">
 							<div class="text-center py-4 text-muted">Loading...</div>
@@ -191,9 +198,13 @@ shopify.ProductImporter = class {
 			this.prevUrl = prevUrl;
 			this.updatePagination();
 
-			// Show notice only when filtering unsynced (client-side, per-page)
-			const noticeEl = this.wrapper.find('#not-synced-notice');
-			filters.synced_filter === 'not_synced' ? noticeEl.show() : noticeEl.hide();
+			// Show notice only for not_synced (client-side per-page filter)
+			const noticeEl = this.wrapper.find('#search-notice');
+			if (filters.synced_filter === 'not_synced') {
+				noticeEl.html('Showing unsynced products from this page only — paginate to find more.').show();
+			} else {
+				noticeEl.hide();
+			}
 
 			return products.map(product => ({
 				'ID':     product.id,
