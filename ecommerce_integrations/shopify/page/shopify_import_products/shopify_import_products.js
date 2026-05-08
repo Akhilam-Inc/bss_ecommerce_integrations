@@ -161,7 +161,7 @@ shopify.ProductImporter = class {
 	getFilters() {
 		return {
 			title:         this.wrapper.find('#filter-title').val().trim() || null,
-			status:        this.wrapper.find('#filter-status').val() || null,
+			status:        'active',
 			synced_filter: this.wrapper.find('#filter-synced').val() || null,
 		};
 	}
@@ -179,7 +179,6 @@ shopify.ProductImporter = class {
 
 	async clearFilters() {
 		this.wrapper.find('#filter-title').val('');
-		this.wrapper.find('#filter-status').val('');
 		this.wrapper.find('#filter-synced').val('');
 		await this.applyFilters();
 	}
