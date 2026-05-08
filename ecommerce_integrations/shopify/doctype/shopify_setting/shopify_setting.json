@@ -49,6 +49,7 @@
   "inventory_sync_section",
   "warehouse",
   "item_sync_by",
+  "main_item_code_based_on",
   "update_erpnext_stock_levels_to_shopify",
   "inventory_sync_frequency",
   "fetch_shopify_locations",
@@ -142,6 +143,16 @@
    "fieldtype": "Select",
    "label": "Create Item Code Based On",
    "options": "SKU\nShopify Product ID\nShopify Product Handle\nShopify Product Title"
+  },
+  {
+   "default": "Shopify Product ID",
+   "depends_on": "eval:doc.item_sync_by === 'SKU'",
+   "description": "When variants use SKU as Item Code, choose what value is used for the main (template) item — templates have no single SKU.",
+   "fieldname": "main_item_code_based_on",
+   "fieldtype": "Select",
+   "label": "Main Item Code Based On",
+   "mandatory_depends_on": "eval:doc.item_sync_by === 'SKU'",
+   "options": "Shopify Product ID\nShopify Product Title\nShopify Product Handle"
   },
   {
    "description": "If Shopify does not have a customer in the order, then while syncing the orders, the system will consider the default customer for the order",
