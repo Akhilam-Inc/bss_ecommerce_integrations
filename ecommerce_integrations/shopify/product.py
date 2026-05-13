@@ -71,11 +71,16 @@ class ShopifyProduct:
 			self._update_item(product_dict)
 
 	def _get_item_code(self, product_dict, variant=None):
-		"""Compute ERPNext item_code based on the item_sync_by setting."""
+		"""Compute ERPNext item_code based on the item_sync_by setting.
+
+		When variant is provided we are coding a variant child item.
+		When variant is None we are coding a template (has_variants=1) or a
+		single-variant product that has no meaningful variants.
+		"""
 		sync_by = getattr(self.setting, "item_sync_by", None) or "Shopify Product ID"
 
 		if variant:
-			# Variant items
+			# ── Variant items ────────────────────────────────────────────────
 			if sync_by == "SKU":
 				return cstr(variant.get("sku")) or cstr(variant.get("id"))
 			elif sync_by == "Shopify Product Handle":
@@ -89,10 +94,21 @@ class ShopifyProduct:
 			else:  # Shopify Product ID (default)
 				return cstr(variant.get("id"))
 		else:
-			# Template or single (non-variant) items
+			# ── Template / single-variant items ──────────────────────────────
 			if sync_by == "SKU":
-				# Templates have no SKU; fall back to product ID
-				return cstr(_get_sku(product_dict)) or cstr(product_dict.get("id"))
+				# Template items have no single SKU — use the separate
+				# "Main Item Code Based On" setting to avoid colliding with a
+				# variant's SKU-derived item_code.
+				main_by = (
+					getattr(self.setting, "main_item_code_based_on", None)
+					or "Shopify Product ID"
+				)
+				if main_by == "Shopify Product Title":
+					return cstr(product_dict.get("title", "")).strip() or cstr(product_dict.get("id"))
+				elif main_by == "Shopify Product Handle":
+					return cstr(product_dict.get("handle")) or cstr(product_dict.get("id"))
+				else:  # "Shopify Product ID" (default / safe fallback)
+					return cstr(product_dict.get("id"))
 			elif sync_by == "Shopify Product Handle":
 				return cstr(product_dict.get("handle")) or cstr(product_dict.get("id"))
 			elif sync_by == "Shopify Product Title":
@@ -323,21 +339,38 @@ class ShopifyProduct:
 		integration_item_code = product_dict["id"]  # shopify product_id
 		variant_id = product_dict.get("variant_id", "")  # shopify variant_id if has variants
 		sku = item_dict["sku"]
+		item_code = item_dict["item_code"]
 
 		if not _match_sku_and_link_item(
 			item_dict, integration_item_code, variant_id, variant_of=variant_of, has_variant=has_variant,
 			shopify_updated_at=shopify_updated_at,
 		):
-			ecommerce_item.create_ecommerce_item(
-				MODULE_NAME,
-				integration_item_code,
-				item_dict,
-				variant_id=variant_id,
-				sku=sku,
-				variant_of=variant_of,
-				has_variants=has_variant,
-				shopify_updated_at=shopify_updated_at,
-			)
+			# If an ERPNext item with the computed item_code already exists (e.g. when
+			# item_sync_by = "SKU" and the SKU-named item was created previously, or for
+			# variant items whose SKU / handle / title matches an existing item_code),
+			# just create the Ecommerce Item link instead of attempting a duplicate insert.
+			existing_item = frappe.db.get_value("Item", {"item_code": item_code})
+			if existing_item:
+				_link_existing_item(
+					existing_item,
+					integration_item_code,
+					variant_id,
+					sku,
+					variant_of,
+					has_variant,
+					shopify_updated_at,
+				)
+			else:
+				ecommerce_item.create_ecommerce_item(
+					MODULE_NAME,
+					integration_item_code,
+					item_dict,
+					variant_id=variant_id,
+					sku=sku,
+					variant_of=variant_of,
+					has_variants=has_variant,
+					shopify_updated_at=shopify_updated_at,
+				)
 
 	def _create_item_variants(self, product_dict, warehouse, attributes, shopify_updated_at=None):
 		template_item = ecommerce_item.get_erpnext_item(
@@ -462,6 +495,45 @@ def _parse_shopify_datetime(dt_str):
 		return dt
 	except Exception:
 		return None
+
+
+def _link_existing_item(
+	item_name, integration_item_code, variant_id, sku, variant_of, has_variants, shopify_updated_at
+):
+	"""Create an Ecommerce Item link for an ERPNext item that already exists.
+
+	Called when the computed item_code (SKU / handle / title) matches an existing ERPNext
+	Item so we must not try to recreate it — only register the integration link.
+	"""
+	# Skip silently if already linked (idempotent)
+	if frappe.db.exists(
+		"Ecommerce Item",
+		{
+			"integration": MODULE_NAME,
+			"integration_item_code": cstr(integration_item_code),
+			"variant_id": cstr(variant_id),
+		},
+	):
+		return
+
+	try:
+		ecom_item = frappe.get_doc(
+			{
+				"doctype": "Ecommerce Item",
+				"integration": MODULE_NAME,
+				"erpnext_item_code": item_name,
+				"integration_item_code": cstr(integration_item_code),
+				"has_variants": has_variants,
+				"variant_id": cstr(variant_id),
+				"variant_of": cstr(variant_of) if variant_of else "",
+				"sku": cstr(sku) if not has_variants else None,
+				"item_synced_on": now(),
+				"shopify_updated_at": shopify_updated_at,
+			}
+		)
+		ecom_item.insert()
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Shopify: Failed to link existing item")
 
 
 def _match_sku_and_link_item(
