@@ -228,6 +228,37 @@ class ShopifyProduct:
 					elif shopify_status in ("draft", "unlisted", "archived"):
 						variant_item.disabled = 1
 
+					# Item code rename handling (SKU / Handle / Title strategies)
+					sync_by = getattr(self.setting, "item_sync_by", None) or "Shopify Product ID"
+					new_sku = cstr(variant.get("sku") or "")
+					old_item_code = variant_ecom.erpnext_item_code
+
+					if sync_by != "Shopify Product ID":
+						new_item_code = self._get_item_code(product_dict, variant=variant)
+						if new_item_code and new_item_code != old_item_code:
+							if frappe.db.exists("Item", new_item_code):
+								frappe.log_error(
+									title="Shopify Item Rename Skipped",
+									message=(
+										f"Cannot rename item '{old_item_code}' to '{new_item_code}' "
+										f"(sync_by={sync_by}) — an item with that code already exists."
+									),
+								)
+							else:
+								try:
+									frappe.rename_doc("Item", old_item_code, new_item_code, force=True)
+									variant_item = frappe.get_doc("Item", new_item_code)
+									variant_item.flags.from_integration = True
+								except Exception:
+									frappe.log_error(
+										title="Shopify Item Rename Failed",
+										message=frappe.get_traceback(),
+									)
+
+					if new_sku:
+						variant_item.custom_shopify_sku = new_sku
+						frappe.db.set_value("Ecommerce Item", variant_ecom.name, "sku", new_sku)
+
 					variant_item.save(ignore_permissions=True)
 				else:
 					# New variant added in Shopify since last sync — create it
