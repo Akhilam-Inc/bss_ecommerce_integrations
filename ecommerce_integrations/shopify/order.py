@@ -44,7 +44,7 @@ def sync_sales_order(payload, request_id=None):
 		shipping_lines = order.get("shipping_lines") or []
 		if shipping_lines:
 			# Shopify uses 'code', fallback to 'title' just in case
-			shipping_code = shipping_lines[0].get("code") or shipping_lines[0].get("title")
+			shipping_code = shipping_lines[0].get("title") or shipping_lines[0].get("code")
 			
 			if shipping_code:
 				# Fetch the active status. Returns None if missing, 0 if inactive, 1 if active.
