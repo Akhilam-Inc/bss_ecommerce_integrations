@@ -358,15 +358,15 @@ def get_order_taxes(shopify_order, setting, items):
 					"dont_recompute_tax": 1,
 				}
 
-			account_tax_map[account_head]["tax_amount"] += amount
+			account_tax_map[account_head]["tax_amount"] = flt(account_tax_map[account_head]["tax_amount"] + amount, 2)
 			item_taxes = account_tax_map[account_head]["item_taxes"]
 
 			if item_code in item_taxes:
-				item_taxes[item_code]["tax"] += amount
+				item_taxes[item_code]["tax"] = flt(item_taxes[item_code]["tax"] + amount, 2)
 				if account_head not in accounts_seen:
-					item_taxes[item_code]["taxable"] += taxable_value
+					item_taxes[item_code]["taxable"] = flt(item_taxes[item_code]["taxable"] + taxable_value, 2)
 			else:
-				item_taxes[item_code] = {"tax": amount, "taxable": taxable_value}
+				item_taxes[item_code] = {"tax": flt(amount, 2), "taxable": flt(taxable_value, 2)}
 
 			accounts_seen.add(account_head)
 
@@ -376,8 +376,8 @@ def get_order_taxes(shopify_order, setting, items):
 	for data in account_tax_map.values():
 		item_wise_tax_detail = {}
 		for item_code, values in data["item_taxes"].items():
-			tax = values["tax"]
-			taxable = values["taxable"]
+			tax = flt(values["tax"], 2)
+			taxable = flt(values["taxable"], 2)
 			effective_rate = round(tax / taxable * 100, 2) if taxable else 0
 			item_wise_tax_detail[item_code] = [effective_rate, tax]
 
@@ -385,7 +385,7 @@ def get_order_taxes(shopify_order, setting, items):
 			"charge_type": data["charge_type"],
 			"account_head": data["account_head"],
 			"description": data["description"],
-			"tax_amount": data["tax_amount"],
+			"tax_amount": flt(data["tax_amount"], 2),
 			"included_in_print_rate": data["included_in_print_rate"],
 			"cost_center": data["cost_center"],
 			"item_wise_tax_detail": item_wise_tax_detail,
@@ -429,24 +429,24 @@ def consolidate_order_taxes(taxes):
 				"item_accumulator": {},
 			},
 		)
-		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount"))
+		tax_account_wise_data[account_head]["tax_amount"] = flt(
+			tax_account_wise_data[account_head]["tax_amount"] + flt(tax.get("tax_amount")), 2
+		)
 		if tax.get("item_wise_tax_detail"):
 			acc = tax_account_wise_data[account_head]["item_accumulator"]
 			for item_code, (rate, amount) in tax["item_wise_tax_detail"].items():
 				if item_code in acc:
-					acc[item_code]["tax"] += amount
-					# taxable is already accumulated in get_order_taxes; don't double-add
+					acc[item_code]["tax"] = flt(acc[item_code]["tax"] + amount, 2)
 				else:
-					# Recompute taxable from effective rate: taxable = amount / rate * 100
-					taxable = (amount / rate * 100) if rate else 0
-					acc[item_code] = {"tax": amount, "taxable": taxable}
+					taxable = flt((amount / rate * 100) if rate else 0, 2)
+					acc[item_code] = {"tax": flt(amount, 2), "taxable": taxable}
 
 	result = []
 	for data in tax_account_wise_data.values():
 		item_wise_tax_detail = {}
 		for item_code, values in data["item_accumulator"].items():
-			tax = values["tax"]
-			taxable = values["taxable"]
+			tax = flt(values["tax"], 2)
+			taxable = flt(values["taxable"], 2)
 			effective_rate = round(tax / taxable * 100, 2) if taxable else 0
 			item_wise_tax_detail[item_code] = [effective_rate, tax]
 
@@ -457,7 +457,7 @@ def consolidate_order_taxes(taxes):
 			"cost_center": data["cost_center"],
 			"included_in_print_rate": data["included_in_print_rate"],
 			"dont_recompute_tax": data["dont_recompute_tax"],
-			"tax_amount": data["tax_amount"],
+			"tax_amount": flt(data["tax_amount"], 2),
 			"item_wise_tax_detail": item_wise_tax_detail,
 		})
 
