@@ -96,7 +96,7 @@ def create_order(order, setting, company=None):
 			create_delivery_note(order, setting, so)
 
 
-def create_sales_order(shopify_order, setting, company=None):
+def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 	customer = setting.default_customer
 	if shopify_order.get("customer", {}):
 		if customer_id := shopify_order.get("customer", {}).get("id"):
@@ -165,12 +165,15 @@ def create_sales_order(shopify_order, setting, company=None):
 
 		if company:
 			so.update({"company": company, "status": "Draft"})
-		
+
 		so.flags.ignore_mandatory = True
 		so.flags.shopiy_order_json = json.dumps(shopify_order)
+
+		if dry_run:
+			return so
+
 		so.save(ignore_permissions=True)
 		so.submit()
-		# frappe.log_error(json.dumps(taxes, indent=2), "Taxes Data")
 
 		if shopify_order.get("note"):
 			so.add_comment(text=f"Order Note: {shopify_order.get('note')}")
@@ -319,26 +322,75 @@ def _get_total_discount(line_item) -> float:
 
 
 def get_order_taxes(shopify_order, setting, items):
-	taxes = []
 	line_items = shopify_order.get("line_items")
+	taxes_inclusive = shopify_order.get("taxes_included")
 
+	# {account_head: {meta, item_taxes: {item_code: {tax, taxable}}}}
+	# taxable_value mirrors what ERPNext will compute for row.taxable_value (rate × qty).
+	# We store it per item so we can compute an effective rate = tax/taxable×100, which
+	# satisfies india_compliance's check: taxable_value × rate/100 == tax_amount exactly.
+	account_tax_map = {}
 	for line_item in line_items:
 		item_code = get_item_code(line_item)
+		taxable_value = _get_item_price(line_item, taxes_inclusive) * cint(line_item.get("quantity"))
+
+		# Track which accounts have already counted taxable_value for this line_item,
+		# because multiple tax_lines can hit the same account (e.g. 2.5% + 9% both → CGST).
+		# We must add taxable_value only once per account per line_item.
+		accounts_seen = set()
+
 		for tax in line_item.get("tax_lines"):
-			taxes.append(
-				{
+			account_head = get_tax_account_head(tax, charge_type="sales_tax")
+			amount = flt(tax.get("price"))
+
+			if account_head not in account_tax_map:
+				account_tax_map[account_head] = {
 					"charge_type": "Actual",
-					"account_head": get_tax_account_head(tax, charge_type="sales_tax"),
+					"account_head": account_head,
 					"description": (
-						get_tax_account_description(tax) or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
+						get_tax_account_description(tax)
+						or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
-					"tax_amount": tax.get("price"),
+					"tax_amount": 0,
 					"included_in_print_rate": 0,
 					"cost_center": setting.cost_center,
-					"item_wise_tax_detail": {item_code: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]},
+					"item_taxes": {},
 					"dont_recompute_tax": 1,
 				}
-			)
+
+			account_tax_map[account_head]["tax_amount"] += amount
+			item_taxes = account_tax_map[account_head]["item_taxes"]
+
+			if item_code in item_taxes:
+				item_taxes[item_code]["tax"] += amount
+				if account_head not in accounts_seen:
+					item_taxes[item_code]["taxable"] += taxable_value
+			else:
+				item_taxes[item_code] = {"tax": amount, "taxable": taxable_value}
+
+			accounts_seen.add(account_head)
+
+	# Build item_wise_tax_detail with effective rate = tax/taxable×100 so that
+	# taxable_value × rate/100 == tax_amount, satisfying india_compliance validation.
+	taxes = []
+	for data in account_tax_map.values():
+		item_wise_tax_detail = {}
+		for item_code, values in data["item_taxes"].items():
+			tax = values["tax"]
+			taxable = values["taxable"]
+			effective_rate = round(tax / taxable * 100, 2) if taxable else 0
+			item_wise_tax_detail[item_code] = [effective_rate, tax]
+
+		taxes.append({
+			"charge_type": data["charge_type"],
+			"account_head": data["account_head"],
+			"description": data["description"],
+			"tax_amount": data["tax_amount"],
+			"included_in_print_rate": data["included_in_print_rate"],
+			"cost_center": data["cost_center"],
+			"item_wise_tax_detail": item_wise_tax_detail,
+			"dont_recompute_tax": data["dont_recompute_tax"],
+		})
 
 	update_taxes_with_shipping_lines(
 		taxes,
@@ -360,6 +412,7 @@ def get_order_taxes(shopify_order, setting, items):
 
 
 def consolidate_order_taxes(taxes):
+	# {account_head: {meta, item_accumulator: {item_code: {tax, taxable}}}}
 	tax_account_wise_data = {}
 	for tax in taxes:
 		account_head = tax["account_head"]
@@ -373,14 +426,42 @@ def consolidate_order_taxes(taxes):
 				"included_in_print_rate": 0,
 				"dont_recompute_tax": 1,
 				"tax_amount": 0,
-				"item_wise_tax_detail": {},
+				"item_accumulator": {},
 			},
 		)
 		tax_account_wise_data[account_head]["tax_amount"] += flt(tax.get("tax_amount"))
 		if tax.get("item_wise_tax_detail"):
-			tax_account_wise_data[account_head]["item_wise_tax_detail"].update(tax["item_wise_tax_detail"])
+			acc = tax_account_wise_data[account_head]["item_accumulator"]
+			for item_code, (rate, amount) in tax["item_wise_tax_detail"].items():
+				if item_code in acc:
+					acc[item_code]["tax"] += amount
+					# taxable is already accumulated in get_order_taxes; don't double-add
+				else:
+					# Recompute taxable from effective rate: taxable = amount / rate * 100
+					taxable = (amount / rate * 100) if rate else 0
+					acc[item_code] = {"tax": amount, "taxable": taxable}
 
-	return tax_account_wise_data.values()
+	result = []
+	for data in tax_account_wise_data.values():
+		item_wise_tax_detail = {}
+		for item_code, values in data["item_accumulator"].items():
+			tax = values["tax"]
+			taxable = values["taxable"]
+			effective_rate = round(tax / taxable * 100, 2) if taxable else 0
+			item_wise_tax_detail[item_code] = [effective_rate, tax]
+
+		result.append({
+			"charge_type": data["charge_type"],
+			"account_head": data["account_head"],
+			"description": data["description"],
+			"cost_center": data["cost_center"],
+			"included_in_print_rate": data["included_in_print_rate"],
+			"dont_recompute_tax": data["dont_recompute_tax"],
+			"tax_amount": data["tax_amount"],
+			"item_wise_tax_detail": item_wise_tax_detail,
+		})
+
+	return result
 
 
 def get_tax_account_head(tax, charge_type: Optional[Literal["shipping", "sales_tax"]] = None):

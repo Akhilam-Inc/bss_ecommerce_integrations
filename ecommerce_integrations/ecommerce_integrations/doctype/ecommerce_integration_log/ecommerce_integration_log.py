@@ -119,3 +119,21 @@ def bulk_retry(names):
 		names = json.loads(names)
 	for name in names:
 		_retry_job(name)
+
+
+@frappe.whitelist()
+def log_order_object(name, request_data):
+	frappe.only_for("System Manager")
+
+	from ecommerce_integrations.shopify.constants import SETTING_DOCTYPE
+	from ecommerce_integrations.shopify.order import create_sales_order
+
+	shopify_order = json.loads(request_data) if isinstance(request_data, str) else request_data
+	setting = frappe.get_doc(SETTING_DOCTYPE)
+
+	so = create_sales_order(shopify_order, setting, dry_run=True)
+
+	frappe.log_error(
+		title=f"Debug: SO Object - {name}",
+		message=json.dumps(so.as_dict() if so else {}, indent=2, default=str),
+	)
