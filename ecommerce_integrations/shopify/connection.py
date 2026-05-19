@@ -74,12 +74,14 @@ def unregister_webhooks(shopify_url: str, password: str) -> None:
 def get_current_domain_name() -> str:
 	"""Get current site domain name. E.g. test.erpnext.com
 
-	If developer_mode is enabled and localtunnel_url is set in site config then domain  is set to localtunnel_url.
+	If tunnel_url or localtunnel_url is set in site config, that value is used as the domain.
+	This allows any HTTP tunnel (ngrok, localtunnel, Cloudflare, etc.) to work without
+	requiring developer_mode to be enabled.
 	"""
-	if frappe.conf.developer_mode and frappe.conf.localtunnel_url:
-		return frappe.conf.localtunnel_url
-	else:
-		return frappe.request.host
+	tunnel_url = frappe.conf.get("tunnel_url") or frappe.conf.get("localtunnel_url")
+	if tunnel_url:
+		return tunnel_url
+	return frappe.request.host
 
 
 def get_callback_url() -> str:

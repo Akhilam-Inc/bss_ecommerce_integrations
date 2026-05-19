@@ -145,8 +145,6 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 				"custom_shopify_order_creation_date": getdate(shopify_order.get("created_at")) or getdate(nowdate()),
 				"custom_order_source": "Shopify",
 				"custom_priority": "Medium",
-				"custom_pincode": shopify_order.get("customer", {}).get("default_address", {}).get("zip") or "",
-				"custom_pincode_area": frappe.db.get_value("Pincode", {"pincode": shopify_order.get("customer", {}).get("default_address", {}).get("zip")}, "area") or "",
 				"custom_shopify_order_creation_time": (
 					get_datetime(shopify_order.get("created_at")).time()
 					if shopify_order.get("created_at")
