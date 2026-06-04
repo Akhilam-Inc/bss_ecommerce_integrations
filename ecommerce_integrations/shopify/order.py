@@ -248,7 +248,7 @@ def get_shopify_item_extra_fields(line_item):
 
 	custom_shopify_base_rate = unit_price
 
-	custom_shopify_rate = unit_price - (item_discount / qty)
+	custom_shopify_rate = flt(unit_price - (item_discount / qty), 2)
 
 	return {
 		"custom_shopify_base_rate": custom_shopify_base_rate,
@@ -284,8 +284,8 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 					"qty": shopify_item.get("quantity"),
 					"stock_uom": shopify_item.get("uom") or "Nos",
 					"warehouse": setting.warehouse,
-					ORDER_ITEM_DISCOUNT_FIELD: (
-						_get_total_discount(shopify_item) / cint(shopify_item.get("quantity"))
+					ORDER_ITEM_DISCOUNT_FIELD: flt(
+						_get_total_discount(shopify_item) / cint(shopify_item.get("quantity")), 2
 					),
 					"custom_applied_discount_from_shopify": extra_fields["custom_applied_discount_from_shopify"],
     				"custom_shopify_rate": extra_fields["custom_shopify_rate"],
@@ -305,13 +305,13 @@ def _get_item_price(line_item, taxes_inclusive: bool) -> float:
 	total_discount = _get_total_discount(line_item)
 
 	if not taxes_inclusive:
-		return price - (total_discount / qty)
+		return flt(price - (total_discount / qty), 2)
 
 	total_taxes = 0.0
 	for tax in line_item.get("tax_lines"):
 		total_taxes += flt(tax.get("price"))
 
-	return price - (total_taxes + total_discount) / qty
+	return flt(price - (total_taxes + total_discount) / qty, 2)
 
 
 def _get_total_discount(line_item) -> float:
