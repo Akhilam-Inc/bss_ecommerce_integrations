@@ -34,6 +34,52 @@ frappe.ui.form.on("Shopify Setting", {
 				integration: "Shopify",
 			});
 		});
+		frm.add_custom_button(__("Test Order Sync"), () => {
+			const d = new frappe.ui.Dialog({
+				title: __("Test Order Sync from Payload"),
+				fields: [
+					{
+						fieldname: "payload_json",
+						fieldtype: "Code",
+						label: __("Shopify Order Payload (JSON)"),
+						options: "JSON",
+						reqd: 1,
+					},
+				],
+				primary_action_label: __("Create Sales Order"),
+				primary_action(values) {
+					d.disable_primary_action();
+					frappe.call({
+						doc: frm.doc,
+						method: "sync_order_from_payload",
+						args: { payload_json: values.payload_json },
+						callback(r) {
+							d.enable_primary_action();
+							if (!r.exc) {
+								const so = r.message;
+								if (so) {
+									frappe.msgprint({
+										title: __("Sales Order Created"),
+										message: __("Sales Order {0} was created successfully.", [
+											`<a href="/app/sales-order/${so}">${so}</a>`,
+										]),
+										indicator: "green",
+									});
+								} else {
+									frappe.msgprint({
+										title: __("Already Exists or Check Logs"),
+										message: __("No new Sales Order was created. It may already exist or an error occurred. Check <a href='/app/ecommerce-integration-log?integration=Shopify'>Ecommerce Integration Logs</a> for details."),
+										indicator: "orange",
+									});
+								}
+								d.hide();
+							}
+						},
+					});
+				},
+			});
+			d.show();
+		}, __("Debug"));
 		frm.trigger("setup_queries");
 	},
 

@@ -109,6 +109,28 @@ class ShopifySetting(SettingController):
 			for wh_map in self.shopify_warehouse_mapping
 		}
 
+	@frappe.whitelist()
+	def sync_order_from_payload(self, payload_json):
+		import json
+		from ecommerce_integrations.shopify.constants import EVENT_MAPPER, ORDER_ID_FIELD
+		from ecommerce_integrations.shopify.order import sync_sales_order
+		from ecommerce_integrations.shopify.utils import create_shopify_log
+
+		try:
+			payload = json.loads(payload_json)
+		except Exception:
+			frappe.throw("Invalid JSON payload.")
+
+		# Replicate exact webhook flow: create the Ecommerce Integration Log first,
+		# then call sync_sales_order synchronously (instead of enqueuing) so the
+		# result is available immediately in the UI.
+		log = create_shopify_log(method=EVENT_MAPPER["orders/create"], request_data=payload)
+		sync_sales_order(payload=payload, request_id=log.name)
+
+		order_id = str(payload.get("id", ""))
+		sales_order = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: order_id}, "name") if order_id else None
+		return sales_order
+
 
 def setup_custom_fields():
 	custom_fields = {
