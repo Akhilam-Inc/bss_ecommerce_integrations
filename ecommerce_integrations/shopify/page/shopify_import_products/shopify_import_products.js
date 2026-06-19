@@ -46,77 +46,67 @@ shopify.ProductImporter = class {
 
 	addMarkup() {
 		const _markup = $(`
-			<div class="row">
-				<div class="col-lg-8 d-flex align-items-stretch">
-					<div class="card border-0 shadow-sm p-3 mb-3 w-100 rounded-sm" style="background-color: var(--card-bg)">
-						<h5 class="border-bottom pb-2">Products in Shopify</h5>
+			<div>
+				<div class="d-flex flex-wrap align-items-stretch mb-3" style="gap: 12px;">
+					<div class="text-center p-3 rounded flex-fill" style="background-color: var(--bg-color); min-width: 120px;">
+						<h4 class="mb-0" id="count-products-shopify">-</h4>
+						<small class="text-muted">in Shopify</small>
+					</div>
+					<div class="text-center p-3 rounded flex-fill" style="background-color: var(--bg-color); min-width: 120px;">
+						<h4 class="mb-0" id="count-products-erpnext">-</h4>
+						<small class="text-muted">in ERPNext</small>
+					</div>
+					<div class="text-center p-3 rounded flex-fill" style="background-color: var(--bg-color); min-width: 120px;">
+						<h4 class="mb-0" id="count-products-synced">-</h4>
+						<small class="text-muted">Synced</small>
+					</div>
+					<div class="d-flex align-items-center flex-fill" style="min-width: 140px;">
+						<button type="button" id="btn-sync-all" class="btn btn-primary w-100 font-weight-bold py-3">Sync all Products</button>
+					</div>
+				</div>
 
-						<div class="shopify-filter-bar mb-3 d-flex flex-wrap align-items-center" style="gap: 8px;">
-							<div>
-								<input type="text" class="form-control form-control-sm" id="filter-title"
-									placeholder="Search by title..." style="max-width: 220px;">
-								<small class="text-muted">Full name match only</small>
-							</div>
-							<select class="form-control form-control-sm" id="filter-status" style="max-width: 140px;">
-								<option value="">All Statuses</option>
-								<option value="active">Active</option>
-								<option value="draft">Draft</option>
-								<option value="archived">Archived</option>
-							</select>
-							<select class="form-control form-control-sm" id="filter-synced" style="max-width: 150px;">
-								<option value="">All Products</option>
-								<option value="synced">Synced</option>
-								<option value="not_synced">Not Synced</option>
-							</select>
-							<button type="button" class="btn btn-sm btn-primary" id="btn-apply-filters">Search</button>
-							<button type="button" class="btn btn-sm btn-default" id="btn-clear-filters">Clear</button>
+				<div class="card border-0 shadow-sm p-3 mb-3 rounded-sm" style="background-color: var(--card-bg)">
+					<h5 class="border-bottom pb-2">Products in Shopify</h5>
+
+					<div class="shopify-filter-bar mb-3 d-flex flex-wrap align-items-center" style="gap: 8px;">
+						<div>
+							<input type="text" class="form-control form-control-sm" id="filter-title"
+								placeholder="Search by title..." style="max-width: 220px;">
+							<small class="text-muted">Full name match only</small>
 						</div>
+						<select class="form-control form-control-sm" id="filter-status" style="max-width: 140px;">
+							<option value="">All Statuses</option>
+							<option value="active">Active</option>
+							<option value="draft">Draft</option>
+							<option value="archived">Archived</option>
+						</select>
+						<select class="form-control form-control-sm" id="filter-synced" style="max-width: 150px;">
+							<option value="">All Products</option>
+							<option value="synced">Synced</option>
+							<option value="not_synced">Not Synced</option>
+						</select>
+						<button type="button" class="btn btn-sm btn-primary" id="btn-apply-filters">Search</button>
+						<button type="button" class="btn btn-sm btn-default" id="btn-clear-filters">Clear</button>
+					</div>
 
-						<div id="search-notice" class="alert alert-warning small py-2 px-3 mb-2" style="display: none;"></div>
+					<div id="search-notice" class="alert alert-warning small py-2 px-3 mb-2" style="display: none;"></div>
 
-						<div id="shopify-product-list">
-							<div class="text-center py-4 text-muted">Loading...</div>
-						</div>
+					<div id="shopify-product-list">
+						<div class="text-center py-4 text-muted">Loading...</div>
+					</div>
 
-						<div class="shopify-datatable-footer mt-2 pt-3 pb-1 border-top d-flex justify-content-between align-items-center" style="display: none !important;">
-							<span class="text-muted small" id="pagination-info">Page 1</span>
-							<div class="btn-group">
-								<button type="button" class="btn btn-sm btn-default btn-paginate btn-prev">← Prev</button>
-								<button type="button" class="btn btn-sm btn-default btn-paginate btn-next">Next →</button>
-							</div>
+					<div class="shopify-datatable-footer mt-2 pt-3 pb-1 border-top d-flex justify-content-between align-items-center" style="display: none !important;">
+						<span class="text-muted small" id="pagination-info">Page 1</span>
+						<div class="btn-group">
+							<button type="button" class="btn btn-sm btn-default btn-paginate btn-prev">← Prev</button>
+							<button type="button" class="btn btn-sm btn-default btn-paginate btn-next">Next →</button>
 						</div>
 					</div>
 				</div>
-				<div class="col-lg-4 d-flex align-items-stretch">
-					<div class="w-100">
-						<div class="card border-0 shadow-sm p-3 mb-3 rounded-sm" style="background-color: var(--card-bg)">
-							<h5 class="border-bottom pb-2">Synchronization Details</h5>
-							<div id="shopify-sync-info">
-								<div class="py-3 border-bottom">
-									<button type="button" id="btn-sync-all" class="btn btn-xl btn-primary w-100 font-weight-bold py-3">Sync all Products</button>
-								</div>
-								<div class="product-count py-3 d-flex justify-content-stretch">
-									<div class="text-center p-3 mx-2 rounded w-100" style="background-color: var(--bg-color)">
-										<h2 id="count-products-shopify">-</h2>
-										<p class="text-muted m-0">in Shopify</p>
-									</div>
-									<div class="text-center p-3 mx-2 rounded w-100" style="background-color: var(--bg-color)">
-										<h2 id="count-products-erpnext">-</h2>
-										<p class="text-muted m-0">in ERPNext</p>
-									</div>
-									<div class="text-center p-3 mx-2 rounded w-100" style="background-color: var(--bg-color)">
-										<h2 id="count-products-synced">-</h2>
-										<p class="text-muted m-0">Synced</p>
-									</div>
-								</div>
-							</div>
-						</div>
 
-						<div class="card border-0 shadow-sm p-3 mb-3 rounded-sm" id="sync-log-card" style="background-color: var(--card-bg); display: none;">
-							<h5 class="border-bottom pb-2">Sync Log</h5>
-							<div class="control-value like-disabled-input for-description overflow-auto" id="shopify-sync-log" style="max-height: 500px;"></div>
-						</div>
-					</div>
+				<div class="card border-0 shadow-sm p-3 mb-3 rounded-sm" id="sync-log-card" style="background-color: var(--card-bg); display: none;">
+					<h5 class="border-bottom pb-2">Sync Log</h5>
+					<div class="control-value like-disabled-input for-description overflow-auto" id="shopify-sync-log" style="max-height: 500px;"></div>
 				</div>
 			</div>
 		`);
@@ -142,11 +132,11 @@ shopify.ProductImporter = class {
 		const listElement = this.wrapper.find('#shopify-product-list')[0];
 		this.shopifyProductTable = new frappe.DataTable(listElement, {
 			columns: [
-				{ name: 'ID',     align: 'left',   editable: false, focusable: false },
-				{ name: 'Name',                    editable: false, focusable: false },
-				{ name: 'SKUs',                    editable: false, focusable: false },
-				{ name: 'Status', align: 'center', editable: false, focusable: false },
-				{ name: 'Action', align: 'center', editable: false, focusable: false },
+				{ name: 'ID',     align: 'left',   width: 140, editable: false, focusable: false },
+				{ name: 'Name',                    width: 300, editable: false, focusable: false },
+				{ name: 'SKUs',                    width: 200, editable: false, focusable: false },
+				{ name: 'Status', align: 'center', width: 100, editable: false, focusable: false },
+				{ name: 'Action', align: 'center', width: 100, editable: false, focusable: false },
 			],
 			data: await this.fetchShopifyProducts(),
 			layout: 'fixed',
@@ -161,7 +151,7 @@ shopify.ProductImporter = class {
 	getFilters() {
 		return {
 			title:         this.wrapper.find('#filter-title').val().trim() || null,
-			status:        'active',
+			status:        this.wrapper.find('#filter-status').val() || null,
 			synced_filter: this.wrapper.find('#filter-synced').val() || null,
 		};
 	}
@@ -179,6 +169,7 @@ shopify.ProductImporter = class {
 
 	async clearFilters() {
 		this.wrapper.find('#filter-title').val('');
+		this.wrapper.find('#filter-status').val('');
 		this.wrapper.find('#filter-synced').val('');
 		await this.applyFilters();
 	}
