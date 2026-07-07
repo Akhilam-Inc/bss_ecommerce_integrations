@@ -17,7 +17,7 @@ from ecommerce_integrations.shopify.constants import (
 	ORDER_STATUS_FIELD,
 	SETTING_DOCTYPE,
 )
-from ecommerce_integrations.shopify.customer import ShopifyCustomer
+from ecommerce_integrations.shopify.customer import ShopifyCustomer, get_matching_customer_address
 from ecommerce_integrations.shopify.product import create_items_if_not_exist, get_item_code
 from ecommerce_integrations.shopify.utils import create_shopify_log
 from ecommerce_integrations.utils.price_list import get_dummy_price_list
@@ -98,9 +98,22 @@ def create_order(order, setting, company=None):
 
 def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 	customer = setting.default_customer
+	shipping_address_name = None
+	billing_address_name = None
 	if shopify_order.get("customer", {}):
 		if customer_id := shopify_order.get("customer", {}).get("id"):
 			customer = frappe.db.get_value("Customer", {CUSTOMER_ID_FIELD: customer_id}, "name")
+			# Resolve the exact Address matching THIS order's own address content,
+			# instead of relying on "whatever the customer's default address is
+			# right now" — a customer can have multiple saved addresses over time.
+			shipping_address_name = get_matching_customer_address(
+				customer, "Shipping", shopify_order.get("shipping_address")
+			)
+			billing_address_name = get_matching_customer_address(
+				customer,
+				"Billing",
+				shopify_order.get("billing_address") or shopify_order.get("customer", {}).get("default_address"),
+			)
 
 	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 
@@ -139,6 +152,8 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 				ORDER_ID_FIELD: str(shopify_order.get("id")),
 				ORDER_NUMBER_FIELD: shopify_order.get("name"),
 				"customer": customer,
+				"shipping_address_name": shipping_address_name,
+				"customer_address": billing_address_name,
 				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"delivery_date": delivery_date,  # ✅ FIX: Add delivery_date here
 				"custom_payment_status": shopify_order.get("financial_status"),

@@ -48,10 +48,10 @@ class ShopifyCustomer(EcommerceCustomer):
 		shopify_address: Dict[str, Any],
 		address_type: str = "Billing",
 		email: Optional[str] = None,
-	) -> None:
+	) -> Optional[str]:
 		"""Create customer address(es) using Customer dict provided by shopify."""
 		address_fields = _map_address_fields(shopify_address, customer_name, address_type, email)
-		super().create_customer_address(address_fields)
+		return super().create_customer_address(address_fields)
 
 	def update_existing_addresses(self, customer):
 		billing_address = customer.get("billing_address", {}) or customer.get("default_address")
@@ -71,18 +71,26 @@ class ShopifyCustomer(EcommerceCustomer):
 		shopify_address: Dict[str, Any],
 		address_type: str = "Billing",
 		email: Optional[str] = None,
-	) -> None:
+	) -> Optional[str]:
 		old_address = self.get_customer_address_doc(address_type)
 
 		if not old_address:
-			self.create_customer_address(customer_name, shopify_address, address_type, email)
-		else:
-			exclude_in_update = ["address_title", "address_type"]
-			new_values = _map_address_fields(shopify_address, customer_name, address_type, email)
+			return self.create_customer_address(customer_name, shopify_address, address_type, email)
 
+		new_values = _map_address_fields(shopify_address, customer_name, address_type, email)
+
+		if _address_content_matches(old_address, new_values):
+			exclude_in_update = ["address_title", "address_type"]
 			old_address.update({k: v for k, v in new_values.items() if k not in exclude_in_update})
 			old_address.flags.ignore_mandatory = True
 			old_address.save()
+			return old_address.name
+
+		# Address content genuinely changed (customer shipped/billed to a
+		# different place) — create a distinct Address instead of overwriting
+		# the one that older Sales Orders/Delivery Notes/Shipments already
+		# link to, which would silently change their address too.
+		return self.create_customer_address(customer_name, shopify_address, address_type, email)
 
 	def create_customer_contact(self, shopify_customer: Dict[str, Any]) -> None:
 
@@ -107,6 +115,38 @@ class ShopifyCustomer(EcommerceCustomer):
 			contact_fields["phone_nos"] = [{"phone": phone_no, "is_primary_phone": True}]
 
 		super().create_customer_contact(contact_fields)
+
+
+COMPARE_ADDRESS_FIELDS = ("address_line1", "address_line2", "city", "state", "pincode")
+
+
+def _address_content_matches(address, values: Dict[str, Any]) -> bool:
+	return all(cstr(address.get(field)) == cstr(values.get(field)) for field in COMPARE_ADDRESS_FIELDS)
+
+
+def get_matching_customer_address(
+	customer_link_name: str, address_type: str, shopify_address: Optional[Dict[str, Any]]
+) -> Optional[str]:
+	"""Return the Address linked to this customer whose content matches shopify_address, if any."""
+	if not shopify_address:
+		return None
+
+	values = _map_address_fields(shopify_address, customer_link_name, address_type, None)
+	addresses = frappe.get_all(
+		"Address",
+		filters=[
+			["Dynamic Link", "link_doctype", "=", "Customer"],
+			["Dynamic Link", "link_name", "=", customer_link_name],
+			["address_type", "=", address_type],
+		],
+		fields=["name", *COMPARE_ADDRESS_FIELDS],
+	)
+
+	for address in addresses:
+		if _address_content_matches(address, values):
+			return address.name
+
+	return None
 
 
 def _map_address_fields(shopify_address, customer_name, address_type, email):

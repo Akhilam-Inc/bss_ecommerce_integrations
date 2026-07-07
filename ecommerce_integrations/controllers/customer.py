@@ -50,18 +50,20 @@ class EcommerceCustomer:
 		except frappe.DoesNotExistError:
 			return None
 
-	def create_customer_address(self, address: Dict[str, str]) -> None:
+	def create_customer_address(self, address: Dict[str, str]) -> str:
 		"""Create address from dictionary containing fields used in Address doctype of ERPNext."""
 
 		customer_doc = self.get_customer_doc()
 
-		frappe.get_doc(
+		address_doc = frappe.get_doc(
 			{
 				"doctype": "Address",
 				**address,
 				"links": [{"link_doctype": "Customer", "link_name": customer_doc.name}],
 			}
-		).insert(ignore_mandatory=True)
+		)
+		address_doc.insert(ignore_mandatory=True)
+		return address_doc.name
 
 	def create_customer_contact(self, contact: Dict[str, str]) -> None:
 		"""Create contact from dictionary containing fields used in Address doctype of ERPNext."""
