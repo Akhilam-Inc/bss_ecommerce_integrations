@@ -168,4 +168,15 @@ def _map_address_fields(shopify_address, customer_name, address_type, email):
 	if validate_phone_number(phone, throw=False):
 		address_fields["phone"] = phone
 
+	# ── Bombaysweets customization: capture the shipping-address recipient ──
+	# The receiver (name + phone on the Shopify shipping address) is often not the
+	# account customer. Store it on the Address so it flows to SO/DN/Shipment.
+	recipient_name = shopify_address.get("name") or " ".join(
+		p for p in [shopify_address.get("first_name"), shopify_address.get("last_name")] if p
+	).strip()
+	if recipient_name:
+		address_fields["custom_recipient_name"] = recipient_name
+	if phone:
+		address_fields["custom_recipient_phone"] = phone
+
 	return address_fields

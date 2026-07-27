@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Literal, Optional
 
 import frappe
@@ -138,10 +139,10 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 			return ""
 
 		taxes = get_order_taxes(shopify_order, setting, items)
-		order_created_date = getdate(shopify_order.get("created_at"))
-		delivery_date = get_delivery_date_from_taxes(taxes, setting, order_created_date)
+		delivery_date = get_future_delivery_date(shopify_order)
 
-		# Update delivery_date in all items
+		# Update delivery_date in all items (blank unless Future Date Delivery supplied
+		# one — bombaysweets_customization's after_insert logic computes it otherwise)
 		for d in items:
 			d["delivery_date"] = delivery_date
 
@@ -156,6 +157,7 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 				"customer_address": billing_address_name,
 				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
 				"delivery_date": delivery_date,  # ✅ FIX: Add delivery_date here
+				"custom_expected_dispatch_date": delivery_date,
 				"custom_payment_status": shopify_order.get("financial_status"),
 				"custom_shopify_order_creation_date": getdate(shopify_order.get("created_at")) or getdate(nowdate()),
 				"custom_order_source": "Shopify",
@@ -198,60 +200,31 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 	return so
 
 
-def get_delivery_date_from_taxes(taxes, setting, order_created_date=None):
+def get_future_delivery_date(shopify_order):
     """
-    Calculate delivery date based on FIRST matching tax in priority order.
+    Returns the customer-selected delivery date from the "Delivery-Date" note
+    attribute when the order's shipping line is "Future Date Delivery" (Zapiet-style
+    future-dated orders); otherwise None so bombaysweets_customization's normal
+    zone-based calculation fills in delivery_date / custom_expected_dispatch_date.
     """
-    if not taxes:
-        return getdate(order_created_date or nowdate())
-    
-    base_date = getdate(order_created_date or nowdate())
-    
-    for tax in taxes:
-        description = (tax.get("description") or "").strip()
-        
-        if not description:
-            continue
-        
-        # Case-insensitive search
-        result = frappe.db.sql("""
-            SELECT days, tax_description
-            FROM `tabShopify Tax Account`
-            WHERE parent = %s 
-            AND LOWER(tax_description) = LOWER(%s)
-            LIMIT 1
-        """, (setting.name, description), as_dict=True)
-        
-        if result:
+    shipping_type = (shopify_order.get("shipping_lines") or [{}])[0].get("title") or ""
+    if shipping_type != "Future Date Delivery":
+        return None
+
+    for attr in shopify_order.get("note_attributes") or []:
+        if attr.get("name") == "Delivery-Date" and attr.get("value"):
             try:
-                days_int = int(float(result[0].days))
-                
-                if days_int > 0:
-                    delivery_date = add_days(base_date, days_int)
-                    
-                    frappe.log_error(
-                        f"Tax: {result[0].tax_description}\n"
-                        f"Days: {days_int}\n"
-                        f"Base Date: {base_date}\n"
-                        f"Delivery Date: {delivery_date}",
-                        "Delivery Date Calculated"
-                    )
-                    
-                    return delivery_date
-                    
-            except (ValueError, TypeError) as e:
-                frappe.log_error(
-                    f"Invalid days value for tax: {description}\nError: {str(e)}",
-                    "Delivery Date Error"
+                return datetime.strptime(attr["value"], "%Y/%m/%d").date()
+            except ValueError:
+                frappe.throw(
+                    f"Sync halted: could not parse Delivery-Date note attribute value "
+                    f"'{attr.get('value')}' (expected format YYYY/MM/DD)."
                 )
-                continue
-    
-    # No match found
-    frappe.log_error(
-        f"No valid tax match found. Using base date: {base_date}",
-        "Delivery Date - Default Used"
+
+    frappe.throw(
+        "Sync halted: shipping line is 'Future Date Delivery' but no 'Delivery-Date' "
+        "note attribute was found on the order."
     )
-    return base_date
 
 def get_shopify_item_extra_fields(line_item):
 
