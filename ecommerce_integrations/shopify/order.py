@@ -189,6 +189,13 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 			return so
 
 		so.save(ignore_permissions=True)
+		# Skip the update-after-submit guard on this initial creation submit.
+		# save() stores derived fields (total_net_weight, item discount_amount, ...)
+		# rounded to DB precision, then submit() recomputes them as raw floats;
+		# the guard's raw `!=` rejects mathematically-equal values that differ only
+		# in float representation (e.g. 2.514 vs 2.5140000000000002), rolling back
+		# the whole order. Nothing is meaningfully "changed after submit" here.
+		so.flags.ignore_validate_update_after_submit = True
 		so.submit()
 
 		if shopify_order.get("note"):
