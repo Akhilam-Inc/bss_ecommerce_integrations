@@ -168,7 +168,7 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 					else nowtime()
 				),
 				"set_warehouse": setting.warehouse,
-				"custom_shopify_order_shipping_type": shopify_order.get("shipping_lines", [{}])[0].get("title") or "",
+				"custom_shopify_order_shipping_type": (shopify_order.get("shipping_lines") or [{}])[0].get("title") or "",
 				"custom_order_notes": shopify_order.get("note"),
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
