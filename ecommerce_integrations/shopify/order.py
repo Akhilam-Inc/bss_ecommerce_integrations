@@ -141,6 +141,10 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 		taxes = get_order_taxes(shopify_order, setting, items)
 		delivery_date = get_future_delivery_date(shopify_order)
 
+		total_discount = sum(
+			_get_total_discount(shopify_item) for shopify_item in shopify_order.get("line_items") or []
+		)
+
 		# Update delivery_date in all items (blank unless Future Date Delivery supplied
 		# one — bombaysweets_customization's after_insert logic computes it otherwise)
 		for d in items:
@@ -170,6 +174,7 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 				"set_warehouse": setting.warehouse,
 				"custom_shopify_order_shipping_type": (shopify_order.get("shipping_lines") or [{}])[0].get("title") or "",
 				"custom_order_notes": shopify_order.get("note"),
+				"custom_shopify_discount": flt(total_discount, 2),
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
 				"ignore_pricing_rule": 1,
