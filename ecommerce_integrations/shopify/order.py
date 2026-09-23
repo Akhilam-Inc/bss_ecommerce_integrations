@@ -273,6 +273,17 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 	if all_product_exists:
 		for shopify_item in order_items:
 			item_code = get_item_code(shopify_item)
+			if not item_code:
+				frappe.throw(
+					_(
+						"Shopify item is not mapped to an ERPNext Item. SKU: {0}, product_id: {1},"
+						" variant_id: {2}. Sync/link this item and retry."
+					).format(
+						shopify_item.get("sku"),
+						shopify_item.get("product_id"),
+						shopify_item.get("variant_id"),
+					)
+				)
 
 			extra_fields = get_shopify_item_extra_fields(shopify_item)
 			items.append(
@@ -331,6 +342,17 @@ def get_order_taxes(shopify_order, setting, items):
 	account_tax_map = {}
 	for line_item in line_items:
 		item_code = get_item_code(line_item)
+		if not item_code:
+			frappe.throw(
+				_(
+					"Shopify item is not mapped to an ERPNext Item. SKU: {0}, product_id: {1},"
+					" variant_id: {2}. Sync/link this item and retry."
+				).format(
+					line_item.get("sku"),
+					line_item.get("product_id"),
+					line_item.get("variant_id"),
+				)
+			)
 		taxable_value = _get_item_price(line_item, taxes_inclusive) * cint(line_item.get("quantity"))
 
 		# Track which accounts have already counted taxable_value for this line_item,

@@ -130,8 +130,9 @@ class ShopifyProduct:
 			self._create_item_variants(product_dict, warehouse, attributes, shopify_updated_at=shopify_updated_at)
 
 		else:
-			product_dict["variant_id"] = product_dict["variants"][0]["id"]
-			product_dict["item_code"] = self._get_item_code(product_dict, variant=product_dict["variants"][0])
+			variant = _find_matching_variant(product_dict["variants"], self.variant_id, self.sku)
+			product_dict["variant_id"] = variant["id"]
+			product_dict["item_code"] = self._get_item_code(product_dict, variant=variant)
 			self._create_item(product_dict, warehouse, shopify_updated_at=shopify_updated_at)
 
 	def _update_item(self, product_dict):
@@ -501,6 +502,25 @@ def _add_weight_details(product_dict):
 def _has_variants(product_dict) -> bool:
 	options = product_dict.get("options")
 	return bool(options and "Default Title" not in options[0]["values"])
+
+
+def _find_matching_variant(variants, variant_id=None, sku=None):
+	"""Pick the Shopify variant this sync call was actually asked for.
+
+	Falls back to the first variant only when neither variant_id nor sku
+	match anything (e.g. this genuinely is the product's only variant).
+	"""
+	if variant_id:
+		for variant in variants:
+			if cstr(variant.get("id")) == cstr(variant_id):
+				return variant
+
+	if sku:
+		for variant in variants:
+			if variant.get("sku") == sku:
+				return variant
+
+	return variants[0]
 
 
 def _get_sku(product_dict):
