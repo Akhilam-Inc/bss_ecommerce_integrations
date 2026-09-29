@@ -81,6 +81,39 @@ class ShopifySetting(SettingController):
 			self.last_inventory_sync = get_datetime("1970-01-01")
 
 	@frappe.whitelist()
+	def register_missing_webhooks(self):
+		"""Desk button action — see connection.register_missing_webhooks for
+		the diff+create logic. Appends ONLY newly-created rows to `webhooks`
+		on a fresh copy of this doc loaded from the database (Shopify Setting
+		is a Single, so frappe.get_doc(self.doctype) reloads it) — not the
+		possibly-dirty `self` this call was invoked against — so any
+		unrelated unsaved edits on the open form are never persisted by
+		this click. Existing rows/webhooks are never touched.
+		"""
+		if not self.is_enabled():
+			frappe.throw(_("Enable Shopify integration first."))
+
+		# NOTE: don't unpack the first return value as `_` — that shadows
+		# frappe's `_` translation function for the whole rest of this
+		# function's scope (Python resolves a name's scope for the entire
+		# function body at once), which broke the frappe.throw(_(...)) call
+		# above with an UnboundLocalError.
+		_all_current, newly_created, errors = connection.register_missing_webhooks(
+			self.shopify_url, self.get_password("password")
+		)
+
+		if newly_created:
+			fresh = frappe.get_doc(self.doctype)
+			for webhook in newly_created:
+				fresh.append("webhooks", {"webhook_id": webhook.id, "method": webhook.topic})
+			fresh.save(ignore_permissions=True)
+
+		return {
+			"registered": sorted(webhook.topic for webhook in newly_created),
+			"errors": errors,
+		}
+
+	@frappe.whitelist()
 	@connection.temp_shopify_session
 	def update_location_table(self):
 		"""Fetch locations from shopify and add it to child table so user can

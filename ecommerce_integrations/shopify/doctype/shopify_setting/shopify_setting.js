@@ -80,6 +80,34 @@ frappe.ui.form.on("Shopify Setting", {
 			});
 			d.show();
 		}, __("Debug"));
+		frm.add_custom_button(__("Register Missing Webhooks"), () => {
+			frappe.confirm(
+				__("Check Shopify for any topics in code that aren't registered yet, and register ONLY those. Existing webhooks are left untouched. Continue?"),
+				() => {
+					frappe.call({
+						doc: frm.doc,
+						method: "register_missing_webhooks",
+						freeze: true,
+						freeze_message: __("Checking Shopify webhooks..."),
+						callback: (r) => {
+							if (!r.message) return;
+							let msg = r.message.registered.length
+								? __("Registered: {0}", [r.message.registered.join(", ")])
+								: __("Nothing to register — all topics already present on Shopify.");
+							if (r.message.errors.length) {
+								msg += "<br><b>" + __("Errors") + ":</b><br>" + r.message.errors.join("<br>");
+							}
+							frappe.msgprint({
+								title: __("Webhook Registration"),
+								indicator: r.message.errors.length ? "orange" : "green",
+								message: msg,
+							});
+							if (r.message.registered.length) frm.reload_doc();
+						},
+					});
+				}
+			);
+		}, __("Debug"));
 		frm.trigger("setup_queries");
 	},
 

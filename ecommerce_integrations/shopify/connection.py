@@ -3,10 +3,11 @@ import functools
 import hashlib
 import hmac
 import json
-from typing import List
+from typing import Dict, List, Tuple
 
 import frappe
 from frappe import _
+from shopify.collection import PaginatedIterator
 from shopify.resources import Webhook
 from shopify.session import Session
 
@@ -69,6 +70,50 @@ def unregister_webhooks(shopify_url: str, password: str) -> None:
 		for webhook in Webhook.find():
 			if url in webhook.address:
 				webhook.destroy()
+
+
+def get_live_webhook_topics(shopify_url: str, password: str) -> Dict[str, Webhook]:
+	"""{topic: Webhook} for every webhook currently registered on Shopify's
+	side whose address matches this site's callback URL — same filter
+	unregister_webhooks already uses above. Paginated via PaginatedIterator
+	(unregister_webhooks's own `for webhook in Webhook.find():` loop above
+	does not paginate — not touching that; this new function paginates
+	correctly from the start).
+	"""
+	url = get_current_domain_name()
+	topics = {}
+
+	with Session.temp(shopify_url, API_VERSION, password):
+		for page in PaginatedIterator(Webhook.find()):
+			for webhook in page:
+				if url in webhook.address:
+					topics[webhook.topic] = webhook
+
+	return topics
+
+
+def register_missing_webhooks(shopify_url: str, password: str) -> Tuple[List[Webhook], List[Webhook], List[str]]:
+	"""Register only the WEBHOOK_EVENTS topics not already live on Shopify —
+	unlike register_webhooks() above, this never unregisters or recreates
+	existing webhooks, so it's safe to run against a live store with zero
+	downtime. Returns (all_current_webhooks, newly_created, error_messages).
+	"""
+	live_topics = get_live_webhook_topics(shopify_url, password)
+	missing = [topic for topic in WEBHOOK_EVENTS if topic not in live_topics]
+
+	newly_created = []
+	errors = []
+
+	with Session.temp(shopify_url, API_VERSION, password):
+		for topic in missing:
+			webhook = Webhook.create({"topic": topic, "address": get_callback_url(), "format": "json"})
+
+			if webhook.is_valid():
+				newly_created.append(webhook)
+			else:
+				errors.append(f"{topic}: {'; '.join(webhook.errors.full_messages())}")
+
+	return list(live_topics.values()) + newly_created, newly_created, errors
 
 
 def get_current_domain_name() -> str:

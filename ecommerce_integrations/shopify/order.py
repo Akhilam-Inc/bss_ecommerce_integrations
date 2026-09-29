@@ -83,6 +83,162 @@ def sync_sales_order(payload, request_id=None):
 		create_shopify_log(status="Success")
 
 
+def handle_order_edited(payload, request_id=None):
+	"""Called by orders/edited event.
+
+	Shopify order was edited after being placed (items/address/amount
+	changed). If nothing physical has happened against the corresponding
+	Sales Order yet, cancel it and recreate a fresh one from the updated
+	payload. Otherwise flag it for manual review — a human decides whether
+	to cascade-cancel the linked docs and recreate, since real fulfillment
+	or invoicing work may already be in progress.
+	"""
+	frappe.set_user("Administrator")
+	frappe.flags.request_id = request_id
+
+	shopify_order_id = cstr(payload.get("id"))
+	so_name = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order_id}, "name")
+
+	if not so_name:
+		# Original sync never landed (or was already superseded) — nothing
+		# to edit against. The normal orders/create retry flow (Ecommerce
+		# Integration Log) owns getting the order in at all.
+		create_shopify_log(status="Invalid", message="No Sales Order found for edited Shopify order")
+		return
+
+	so_doc = frappe.get_doc("Sales Order", so_name)
+
+	if so_doc.docstatus == 2:
+		# Already cancelled — either a previous edit already handled this,
+		# or orders/cancelled raced ahead of us. No-op, not an error.
+		create_shopify_log(status="Invalid", message=f"Sales Order {so_name} already cancelled")
+		return
+
+	# Idempotency: Shopify can and does deliver the same webhook more than
+	# once. Compare Shopify's own updated_at against what we last processed
+	# so a duplicate delivery is a clean no-op.
+	if so_doc.get("custom_shopify_updated_at") and so_doc.get("custom_shopify_updated_at") == payload.get("updated_at"):
+		create_shopify_log(status="Invalid", message=f"Edit already processed for {so_name}")
+		return
+
+	try:
+		if _is_safe_to_auto_recreate(so_doc):
+			_cancel_and_recreate(so_doc, payload)
+		else:
+			_flag_for_manual_review(so_doc, payload)
+	except Exception as e:
+		create_shopify_log(status="Error", exception=e, rollback=True)
+
+
+def _is_safe_to_auto_recreate(so_doc):
+	"""True only when nothing physical or financial has happened yet against
+	this order — safe to blow it away and recreate from the edited payload.
+	Deliberately not keyed off workflow_state alone: a Pick List can exist
+	in Draft, and a Sales Invoice can exist on a prepaid order, while
+	workflow_state still reads "To Process".
+	"""
+	if so_doc.workflow_state not in ("Pending", "To Process"):
+		return False
+	if so_doc.get("custom_shipment_reference"):
+		return False
+	if frappe.db.exists("Pick List Item", {"sales_order": so_doc.name}):
+		return False
+	if frappe.db.exists("Sales Invoice Item", {"sales_order": so_doc.name}):
+		return False
+	return True
+
+
+def _cancel_and_recreate(so_doc, payload):
+	"""SAFE path: cancel the stale Sales Order and recreate it fresh from
+	the updated Shopify payload. Does not touch create_sales_order itself —
+	only calls it, the same way sync_sales_order already does.
+	"""
+	from bombaysweets_customization.bombaysweets_customization.overrides.sales_order import (
+		_stamp_cancelled_workflow_state,
+	)
+
+	old_name = so_doc.name
+	so_doc.flags.ignore_permissions = True
+	so_doc.cancel()
+	_stamp_cancelled_workflow_state(so_doc)
+
+	# Free shopify_order_id — create_sales_order's own duplicate check
+	# (frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: ...})) does not
+	# filter by docstatus, so without this the "new" create would just find
+	# and return this now-cancelled doc instead of making a fresh one.
+	frappe.db.set_value(
+		"Sales Order", old_name, ORDER_ID_FIELD,
+		f"{payload.get('id')}-SUPERSEDED-{old_name}",
+		update_modified=False,
+	)
+
+	setting = frappe.get_doc(SETTING_DOCTYPE)
+	try:
+		new_so = create_sales_order(payload, setting)
+		if new_so:
+			new_so.db_set("custom_shopify_updated_at", payload.get("updated_at"), update_modified=False)
+			new_so.add_comment(
+				"Comment",
+				text=f"Recreated automatically — original order {old_name} was edited on Shopify.",
+			)
+		create_shopify_log(
+			status="Success",
+			message=f"Order edited: cancelled {old_name}, recreated as {new_so.name if new_so else '(failed)'}",
+		)
+	except Exception:
+		# Old SO is already cancelled; the new create failed for an
+		# unrelated reason (bad data in the edited payload, etc). Leaving
+		# it cancelled is safer than reviving stale line items — the
+		# failure surfaces through the same generic Error/retry flow every
+		# other create_sales_order failure already uses.
+		frappe.log_error(frappe.get_traceback(), f"Order edit recreate failed after cancelling {old_name}")
+		raise
+
+
+def _flag_for_manual_review(so_doc, payload):
+	"""NOT SAFE path: real fulfillment or invoicing work already started
+	against this order. Don't touch it automatically — flag it for a human
+	to review on the Order Edit Review page, where they can cascade-cancel
+	the linked docs and recreate if they decide that's the right call.
+	"""
+	reasons = []
+	if frappe.db.exists("Sales Invoice Item", {"sales_order": so_doc.name}):
+		reasons.append("Sales Invoice already exists")
+	if so_doc.get("custom_shipment_reference"):
+		reasons.append("Shipment already booked")
+	if frappe.db.exists("Pick List Item", {"sales_order": so_doc.name}):
+		reasons.append("Pick List already exists")
+	if so_doc.workflow_state not in ("Pending", "To Process"):
+		reasons.append(f"Order already at workflow state '{so_doc.workflow_state}'")
+
+	message = f"Order edited on Shopify — needs review ({so_doc.name}): " + "; ".join(reasons)
+
+	# Supersede any earlier still-open review log for this SAME order, so a
+	# reviewer only ever acts on the latest payload rather than a stale one
+	# left behind by a previous edit that arrived before this one. This
+	# delivery's own log row is still "Queued" at this point (only flipped
+	# to Error by create_shopify_log below), so it can never match here.
+	older_logs = frappe.db.get_all(
+		"Ecommerce Integration Log",
+		filters={
+			"status": "Error",
+			"message": ["like", f"%needs review ({so_doc.name})%"],
+		},
+		pluck="name",
+	)
+	for older_name in older_logs:
+		frappe.db.set_value(
+			"Ecommerce Integration Log", older_name, "status", "Invalid", update_modified=False,
+		)
+		frappe.db.set_value(
+			"Ecommerce Integration Log", older_name, "message",
+			f"Superseded by a newer edit — see the latest 'needs review' log for {so_doc.name}",
+			update_modified=False,
+		)
+
+	create_shopify_log(status="Error", message=message, request_data=payload)
+
+
 def create_order(order, setting, company=None):
 	# local import to avoid circular dependencies
 	from ecommerce_integrations.shopify.fulfillment import create_delivery_note
