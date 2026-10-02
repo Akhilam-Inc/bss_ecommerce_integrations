@@ -83,6 +83,25 @@ def sync_sales_order(payload, request_id=None):
 		create_shopify_log(status="Success")
 
 
+@temp_shopify_session
+def _fetch_full_shopify_order(shopify_order_id):
+	"""orders/edited's payload is only a diff (line item additions/
+	removals by id+delta) — not a full order snapshot like orders/create
+	gets. Fetch the current full order so create_sales_order and the
+	review page's diff display have the same shape they already expect.
+	Reuses the exact Order/temp_shopify_session pattern sync_old_orders/
+	_fetch_old_orders already use below — nothing new invented.
+	"""
+	try:
+		order = Order.find(shopify_order_id)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(), f"Could not fetch Shopify order {shopify_order_id} for orders/edited"
+		)
+		return None
+	return order.to_dict() if order else None
+
+
 def handle_order_edited(payload, request_id=None):
 	"""Called by orders/edited event.
 
@@ -96,7 +115,20 @@ def handle_order_edited(payload, request_id=None):
 	frappe.set_user("Administrator")
 	frappe.flags.request_id = request_id
 
-	shopify_order_id = cstr(payload.get("id"))
+	# orders/edited's own payload is NOT shaped like orders/create's — it's
+	# Shopify's distinct "Order Edit" object, wrapped under a top-level
+	# order_edit key: {"order_edit": {"id": <edit id>, "order_id": <the
+	# actual order id>, "line_items": {"additions": [...], "removals":
+	# [...]}, ...}}. payload["id"] would be the EDIT's own id, not the
+	# order's — confirmed from a real failure where this exact mismatch
+	# caused every edited order to log "No Sales Order found" even though
+	# the Sales Order existed with the matching shopify_order_id.
+	order_edit = payload.get("order_edit") or {}
+	shopify_order_id = cstr(order_edit.get("order_id"))
+	if not shopify_order_id:
+		create_shopify_log(status="Invalid", message="orders/edited payload missing order_edit.order_id")
+		return
+
 	so_name = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order_id}, "name")
 
 	if not so_name:
@@ -114,18 +146,29 @@ def handle_order_edited(payload, request_id=None):
 		create_shopify_log(status="Invalid", message=f"Sales Order {so_name} already cancelled")
 		return
 
+	# The orders/edited payload is only a diff (line item additions/
+	# removals by id + quantity delta) — no item/customer/address/price/
+	# updated_at data at all. create_sales_order (SAFE path) and the
+	# review page's diff display (REVIEW path) both need the full current
+	# order, the same shape orders/create gets — fetch it fresh from
+	# Shopify and use that as "payload" for everything downstream.
+	full_order = _fetch_full_shopify_order(shopify_order_id)
+	if not full_order:
+		create_shopify_log(status="Error", message=f"Could not fetch current order {shopify_order_id} from Shopify for {so_name}")
+		return
+
 	# Idempotency: Shopify can and does deliver the same webhook more than
 	# once. Compare Shopify's own updated_at against what we last processed
 	# so a duplicate delivery is a clean no-op.
-	if so_doc.get("custom_shopify_updated_at") and so_doc.get("custom_shopify_updated_at") == payload.get("updated_at"):
+	if so_doc.get("custom_shopify_updated_at") and so_doc.get("custom_shopify_updated_at") == full_order.get("updated_at"):
 		create_shopify_log(status="Invalid", message=f"Edit already processed for {so_name}")
 		return
 
 	try:
 		if _is_safe_to_auto_recreate(so_doc):
-			_cancel_and_recreate(so_doc, payload)
+			_cancel_and_recreate(so_doc, full_order)
 		else:
-			_flag_for_manual_review(so_doc, payload)
+			_flag_for_manual_review(so_doc, full_order)
 	except Exception as e:
 		create_shopify_log(status="Error", exception=e, rollback=True)
 
