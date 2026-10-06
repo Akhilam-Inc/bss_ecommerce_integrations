@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 from typing import Literal, Optional
@@ -318,11 +319,14 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 
 	if not so:
+		# Work on a (possibly) tax-rebalanced copy for items/taxes only; the original
+		# payload is what gets stored on the Sales Order / Integration Log.
+		calc_order = move_orphan_line_tax_to_shipping(shopify_order)
 		items = get_order_items(
-			shopify_order.get("line_items"),
+			calc_order.get("line_items"),
 			setting,
 			getdate(shopify_order.get("created_at")),
-			taxes_inclusive=shopify_order.get("taxes_included"),
+			taxes_inclusive=calc_order.get("taxes_included"),
 		)
 
 		if not items:
@@ -337,7 +341,7 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 
 			return ""
 
-		taxes = get_order_taxes(shopify_order, setting, items)
+		taxes = get_order_taxes(calc_order, setting, items)
 		delivery_date = get_future_delivery_date(shopify_order)
 
 		total_discount = sum(
@@ -405,10 +409,96 @@ def create_sales_order(shopify_order, setting, company=None, dry_run=False):
 		if shopify_order.get("note"):
 			so.add_comment(text=f"Order Note: {shopify_order.get('note')}")
 
+		if calc_order.get("_tax_moved_to_shipping"):
+			so.add_comment(
+				text=(
+					f"Shopify booked {calc_order['_tax_moved_to_shipping']} of tax on a fully discounted "
+					"product line; it was re-attributed to the shipping charge so the line rate is not negative."
+				)
+			)
+
 	else:
 		so = frappe.get_doc("Sales Order", so)
 
 	return so
+
+
+def move_orphan_line_tax_to_shipping(shopify_order):
+	"""Re-attribute tax that Shopify booked on a fully discounted product line to the
+	untaxed shipping line it really belongs to.
+
+	With taxes_included, the item rate is price - (line tax + discount) / qty. When a
+	discount code zeroes the only line but the order still pays shipping, Shopify can
+	book the GST *of the shipping charge* (inclusive: price * rate / (100 + rate)) on
+	that line while shipping_lines[].tax_lines is empty. The line then works out to
+	a negative rate (e.g. 500 - (19.06 + 500) = -19.06) and ERPNext rejects it. Totals
+	still reconcile, the tax is just on the wrong line.
+
+	For each such line this moves whole same-rate tax groups (so CGST+SGST travel
+	together), highest rate first, onto a shipping line that has a price and no tax
+	lines, until the line is no longer negative. Does nothing (returns the payload
+	unchanged) unless taxes are included, and skips a line it cannot fully balance.
+	Never mutates `shopify_order`; a rebalanced copy carries `_tax_moved_to_shipping`.
+	"""
+	if not shopify_order.get("taxes_included"):
+		return shopify_order
+
+	tolerance = 0.005
+	order = copy.deepcopy(shopify_order)
+	# remaining shipping amount (after its own discounts) that can absorb moved tax
+	capacity = {}
+	for idx, shipping in enumerate(order.get("shipping_lines") or []):
+		if flt(shipping.get("price")) and not (shipping.get("tax_lines") or []):
+			discounts = sum(flt(d.get("amount")) for d in shipping.get("discount_allocations") or [])
+			capacity[idx] = flt(shipping.get("price")) - discounts
+	if not capacity:
+		return shopify_order
+
+	moved_total = 0.0
+	for line in order.get("line_items") or []:
+		tax_lines = line.get("tax_lines") or []
+		if not tax_lines:
+			continue
+
+		net = (
+			flt(line.get("price")) * (cint(line.get("quantity")) or 1)
+			- _get_total_discount(line)
+			- sum(flt(t.get("price")) for t in tax_lines)
+		)
+		if net >= -tolerance:
+			continue
+
+		groups = {}
+		for tax in tax_lines:
+			groups.setdefault(flt(tax.get("rate")), []).append(tax)
+
+		# Plan first, change only if the whole line can be balanced.
+		plan = []
+		remaining = net
+		for rate in sorted(groups, reverse=True):
+			if remaining >= -tolerance:
+				break
+			amount = sum(flt(t.get("price")) for t in groups[rate])
+			target = next((i for i, cap in capacity.items() if cap - amount >= -tolerance), None)
+			if target is None:
+				break
+			plan.append((rate, target, amount))
+			remaining += amount
+		if remaining < -tolerance:
+			continue
+
+		for rate, target, amount in plan:
+			shipping = order["shipping_lines"][target]
+			shipping["tax_lines"] = (shipping.get("tax_lines") or []) + groups[rate]
+			line["tax_lines"] = [t for t in line["tax_lines"] if all(t is not g for g in groups[rate])]
+			capacity[target] -= amount
+			moved_total += amount
+
+	if not moved_total:
+		return shopify_order
+
+	order["_tax_moved_to_shipping"] = flt(moved_total, 2)
+	return order
 
 
 def get_future_delivery_date(shopify_order):
